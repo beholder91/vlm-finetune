@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# train.py — RolmOCR 训练脚本，从预处理数据加载并训练模型
+# train.py — RolmOCR 训练脚本，直接加载预处理好的数据集进行训练
 
 import os
 import json
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -14,10 +15,11 @@ from transformers import (
 )
 from transformers.integrations import WandbCallback, TensorBoardCallback
 import wandb
+from datasets import load_from_disk
 
 # 训练参数 - 可直接修改
 MODEL_ID = "Qwen/Qwen2.5-VL-2B-Instruct"
-DATA_DIR = "./processed_data"
+DATASET_PATH = "./processed_data/ocr_dataset"  # 预处理好的数据集路径
 OUTPUT_DIR = "./rolmocr_output"
 WANDB_PROJECT = "RolmOCR-finetune"
 MAX_SAMPLES = None  # 设置为None表示使用全部样本
@@ -28,38 +30,41 @@ USE_FP16 = True
 LOGGING_STEPS = 100
 EVAL_STEPS = 500
 SAVE_STEPS = 500
+NUM_WORKERS = 4  # 数据加载的线程数
 
-class ProcessedOCRDataset(Dataset):
-    """处理好的OCR数据集类"""
+# 图像预处理转换
+image_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+class PreprocessedOCRDataset(Dataset):
+    """包装预处理好的HuggingFace数据集，便于训练使用"""
     
-    def __init__(self, metadata_file, max_samples=None):
+    def __init__(self, dataset, transform=None):
         """初始化数据集
         
         Args:
-            metadata_file: JSONL格式的元数据文件路径
-            max_samples: 最大样本数，None表示加载全部
+            dataset: HuggingFace Dataset对象
+            transform: 图像转换函数
         """
-        self.samples = []
+        self.dataset = dataset
+        self.transform = transform
         
-        print(f"从 {metadata_file} 加载元数据...")
-        with open(metadata_file, 'r') as f:
-            for i, line in enumerate(f):
-                if max_samples is not None and i >= max_samples:
-                    break
-                    
-                metadata = json.loads(line.strip())
-                self.samples.append(metadata)
-        
-        print(f"加载了 {len(self.samples)} 个样本")
+        print(f"加载了 {len(dataset)} 个预处理好的样本")
     
     def __len__(self):
-        return len(self.samples)
+        return len(self.dataset)
     
     def __getitem__(self, idx):
-        sample = self.samples[idx]
+        sample = self.dataset[idx]
         
-        # 加载图像张量
-        img_tensor = torch.load(sample["img_path"])
+        # 获取图像并应用转换
+        img = sample["image"]
+        if self.transform:
+            img_tensor = self.transform(img)
+        else:
+            img_tensor = transforms.ToTensor()(img)
         
         return {
             "img_tensor": img_tensor,
@@ -72,16 +77,32 @@ def main():
     os.environ["WANDB_PROJECT"] = WANDB_PROJECT
     wandb.init()
 
-    # 2. 加载数据集
-    metadata_file = os.path.join(DATA_DIR, "metadata.jsonl")
-    if not os.path.exists(metadata_file):
-        print(f"错误: 元数据文件 {metadata_file} 不存在，请先运行 data_prepare.py")
+    # 2. 直接加载预处理好的数据集
+    print(f"正在加载预处理好的数据集: {DATASET_PATH}")
+    if not os.path.exists(DATASET_PATH):
+        print(f"错误: 数据集目录 {DATASET_PATH} 不存在，请先运行 data_prepare.py")
         return
+    
+    try:
+        # 加载预处理好的HuggingFace数据集
+        hf_dataset = load_from_disk(DATASET_PATH)
         
-    train_dataset = ProcessedOCRDataset(metadata_file, max_samples=MAX_SAMPLES)
+        # 如果需要限制样本数
+        if MAX_SAMPLES is not None and MAX_SAMPLES < len(hf_dataset):
+            hf_dataset = hf_dataset.select(range(MAX_SAMPLES))
+        
+        # 包装为PyTorch Dataset
+        train_dataset = PreprocessedOCRDataset(
+            dataset=hf_dataset,
+            transform=image_transform
+        )
+        
+    except Exception as e:
+        print(f"加载数据集出错: {e}")
+        return
     
     if len(train_dataset) == 0:
-        print("错误: 没有加载到任何样本，请检查预处理数据")
+        print("错误: 没有加载到任何样本，请检查数据集")
         return
     
     # 3. 加载分词器与模型
@@ -108,6 +129,7 @@ def main():
         load_best_model_at_end=True,
         greater_is_better=False,
         metric_for_best_model="loss",
+        dataloader_num_workers=NUM_WORKERS,  # 多线程加载数据
     )
 
     # 6. Trainer 实例化
