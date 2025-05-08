@@ -5,7 +5,6 @@ import os
 import io
 import json
 import random
-import requests
 from PIL import Image
 import torch
 import fitz  # PyMuPDF
@@ -13,20 +12,18 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 # 配置参数 - 可以直接在此修改
-DATASET_ID = "allenai/olmOCR-mix-0225"
-SUBSET = "00_documents"
-SPLIT = "train_s2pdf"
+LOCAL_DATASET_PATH = "./olmOCR-mix-0225/train-s2pdf.parquet"
+PDF_DIR = "./olmOCR-mix-0225/pdfs"
 OUTPUT_DIR = "./processed_data"
 MAX_SAMPLES = 100  # 修改为None可处理全部样本
 
-def process_image(url, page_number, rotation_prob=0.15, max_side=1024):
+def process_image(pdf_id, rotation_prob=0.15, max_side=1024):
     """处理单个图像，返回处理后的张量"""
     try:
-        # 从URL获取PDF并提取特定页面
-        response = requests.get(url, timeout=30)
-        pdf_data = io.BytesIO(response.content)
-        pdf_doc = fitz.open(stream=pdf_data, filetype="pdf")
-        page = pdf_doc[page_number - 1]  # 页码从0开始索引
+        # 从本地读取PDF (每个PDF就是单页)
+        pdf_path = os.path.join(PDF_DIR, f"{pdf_id}.pdf")
+        pdf_doc = fitz.open(pdf_path)
+        page = pdf_doc[0]  # 只有一页，直接取第一页
         pix = page.get_pixmap()
         img_data = pix.tobytes("ppm")
         img = Image.open(io.BytesIO(img_data)).convert("RGB")
@@ -58,16 +55,16 @@ def process_image(url, page_number, rotation_prob=0.15, max_side=1024):
         }
     
     except Exception as e:
-        print(f"处理图像时出错: {e}, URL: {url}, 页码: {page_number}")
+        print(f"处理图像时出错: {e}, PDF ID: {pdf_id}")
         return {"success": False, "error": str(e)}
 
 def process_dataset():
     """处理数据集并保存为文件"""
-    print(f"加载数据集: {DATASET_ID}/{SUBSET}/{SPLIT}")
+    print(f"加载本地数据集: {LOCAL_DATASET_PATH}")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     # 加载数据集
-    ds = load_dataset(DATASET_ID, SUBSET, split=SPLIT)
+    ds = load_dataset("parquet", data_files=LOCAL_DATASET_PATH)["train"]
     total = len(ds) if MAX_SAMPLES is None else min(MAX_SAMPLES, len(ds))
     print(f"共有 {total} 个样本需要处理")
     
@@ -81,8 +78,8 @@ def process_dataset():
                 break
                 
             try:
-                # 处理图像
-                result = process_image(example["url"], example["page_number"])
+                # 处理图像，不再需要传递页码
+                result = process_image(example["id"])
                 
                 if result["success"]:
                     # 保存图像张量
@@ -91,7 +88,7 @@ def process_dataset():
                     
                     # 保存元数据
                     metadata = {
-                        "id": example.get("id", str(i)),
+                        "id": example["id"],
                         "img_path": img_path,
                         "response": example["response"],
                         "width": result["width"],
