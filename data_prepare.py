@@ -15,7 +15,7 @@ from tqdm import tqdm
 LOCAL_DATASET_PATH = "./olmOCR-mix-0225/train-s2pdf.parquet"
 PDF_DIR = "./olmOCR-mix-0225/pdfs"
 OUTPUT_DIR = "./processed_data"
-MAX_SAMPLES = 100  # 修改为None可处理全部样本
+MAX_SAMPLES = 1000  # 修改为None可处理全部样本
 
 def process_image(pdf_id, rotation_prob=0.15, max_side=1024):
     """处理单个图像，返回处理后的张量"""
