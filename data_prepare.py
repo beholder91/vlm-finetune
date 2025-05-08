@@ -17,7 +17,7 @@ LOCAL_DATASET_PATH = "./olmOCR-mix-0225/train-s2pdf.parquet"
 PDF_DIR = "./olmOCR-mix-0225/pdfs"
 OUTPUT_DIR = "./processed_data"
 OUTPUT_DATASET_PATH = os.path.join(OUTPUT_DIR, "ocr_dataset")
-MAX_SAMPLES = None  # 修改为None可处理全部样本
+MAX_SAMPLES = 1000  # 修改为None可处理全部样本
 MAX_SIDE = 1024  # 图像最大边长
 
 def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
@@ -57,6 +57,26 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
         print(f"处理图像时出错: {e}, PDF ID: {pdf_id}")
         return {"success": False, "error": str(e)}
 
+def preprocess_fn(example):
+    """单个样本的处理函数，用于map方法"""
+    try:
+        # 处理图像
+        result = process_image(example["id"])
+        
+        if result["success"]:
+            return {
+                "id": example["id"],
+                "image": result["image"],
+                "response": example["response"],
+                "width": result["width"],
+                "height": result["height"]
+            }
+        
+    except Exception as e:
+        print(f"处理样本时出错: {e}, ID: {example['id']}")
+    
+    return None
+
 def prepare_dataset():
     """将数据集处理并保存为HuggingFace Dataset格式"""
     print(f"加载本地数据集: {LOCAL_DATASET_PATH}")
@@ -64,47 +84,30 @@ def prepare_dataset():
     
     # 加载原始数据集
     ds = load_dataset("parquet", data_files=LOCAL_DATASET_PATH)["train"]
-    total = len(ds) if MAX_SAMPLES is None else min(MAX_SAMPLES, len(ds))
+    if MAX_SAMPLES is not None:
+        ds = ds.select(range(min(MAX_SAMPLES, len(ds))))
+    
+    total = len(ds)
     print(f"共有 {total} 个样本需要处理")
     
-    # 准备新数据集的数据
-    dataset_dict = {
-        "id": [],
-        "image": [],
-        "response": [],
-        "width": [],
-        "height": []
-    }
+    # 使用map方法并行处理数据集
+    print("开始并行处理数据集...")
+    processed_ds = ds.map(
+        preprocess_fn, 
+        remove_columns=ds.column_names, 
+        num_proc=4,
+        desc="处理样本",
+        keep_in_memory=False
+    )
     
-    # 处理样本
-    processed_count = 0
-    error_count = 0
+    # 过滤掉处理失败的样本（返回None的样本）
+    processed_ds = processed_ds.filter(lambda x: x is not None)
     
-    for i, example in enumerate(tqdm(ds, total=total)):
-        if MAX_SAMPLES is not None and i >= MAX_SAMPLES:
-            break
-            
-        try:
-            # 处理图像
-            result = process_image(example["id"])
-            
-            if result["success"]:
-                # 添加到数据集
-                dataset_dict["id"].append(example["id"])
-                dataset_dict["image"].append(result["image"])
-                dataset_dict["response"].append(example["response"])
-                dataset_dict["width"].append(result["width"])
-                dataset_dict["height"].append(result["height"])
-                processed_count += 1
-            else:
-                error_count += 1
-                
-        except Exception as e:
-            print(f"处理样本 {i} 时出错: {e}")
-            error_count += 1
+    processed_count = len(processed_ds)
+    error_count = total - processed_count
     
     # 创建HuggingFace Dataset
-    print(f"创建HuggingFace Dataset，包含 {len(dataset_dict['id'])} 个样本...")
+    print(f"创建HuggingFace Dataset，包含 {processed_count} 个样本...")
     features = Features({
         "id": Value("string"),
         "image": DsImage(),
@@ -113,11 +116,12 @@ def prepare_dataset():
         "height": Value("int32")
     })
     
-    dataset = Dataset.from_dict(dataset_dict, features=features)
+    # 确保数据类型符合预期
+    processed_ds = processed_ds.cast(features)
     
     # 保存数据集
     print(f"保存数据集到 {OUTPUT_DATASET_PATH}...")
-    dataset.save_to_disk(OUTPUT_DATASET_PATH)
+    processed_ds.save_to_disk(OUTPUT_DATASET_PATH)
     
     # 保存一个描述文件，方便训练脚本了解数据集结构
     with open(os.path.join(OUTPUT_DIR, "dataset_info.json"), "w") as f:
