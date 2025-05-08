@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-# train.py — RolmOCR 全量微调脚本，集成 HF Trainer + W&B + TensorBoard
+# train.py — RolmOCR 训练脚本，从预处理数据加载并训练模型
 
 import os
-import random
-import io
-import requests
-from datasets import load_dataset
-from PIL import Image
+import json
 import torch
+from torch.utils.data import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -17,95 +14,123 @@ from transformers import (
 )
 from transformers.integrations import WandbCallback, TensorBoardCallback
 import wandb
-import fitz  # PyMuPDF
 
-def preprocess_example(example, rotation_prob=0.15, max_side=1024):
-    # 从URL获取PDF并提取特定页面
-    response = requests.get(example["url"])
-    pdf_data = io.BytesIO(response.content)
-    pdf_doc = fitz.open(stream=pdf_data, filetype="pdf")
-    page = pdf_doc[example["page_number"] - 1]  # 页码从0开始索引
-    pix = page.get_pixmap()
-    img_data = pix.tobytes("ppm")
-    img = Image.open(io.BytesIO(img_data)).convert("RGB")
+# 训练参数 - 可直接修改
+MODEL_ID = "Qwen/Qwen2.5-VL-2B-Instruct"
+DATA_DIR = "./processed_data"
+OUTPUT_DIR = "./rolmocr_output"
+WANDB_PROJECT = "RolmOCR-finetune"
+MAX_SAMPLES = None  # 设置为None表示使用全部样本
+EPOCHS = 3
+BATCH_SIZE = 1
+LEARNING_RATE = 3e-5
+USE_FP16 = True
+LOGGING_STEPS = 100
+EVAL_STEPS = 500
+SAVE_STEPS = 500
+
+class ProcessedOCRDataset(Dataset):
+    """处理好的OCR数据集类"""
     
-    # 15% 概率随机旋转输入图像
-    if random.random() < rotation_prob:
-        angle = random.uniform(-15, 15)
-        img = img.rotate(angle, expand=True)
-    # Resize: 最长边为 max_side
-    w, h = img.size
-    scale = max_side / max(w, h)
-    img = img.resize((int(w * scale), int(h * scale)))
-    example["img_tensor"] = torch.tensor(
-        (torch.ByteTensor(torch.ByteStorage.from_buffer(img.tobytes()))
-         .view(h, w, 3)
-         .permute(2, 0, 1)),
-        dtype=torch.float32
-    ) / 255.0
-    example["labels"] = example["response"]["raw_text"]
-    return example
+    def __init__(self, metadata_file, max_samples=None):
+        """初始化数据集
+        
+        Args:
+            metadata_file: JSONL格式的元数据文件路径
+            max_samples: 最大样本数，None表示加载全部
+        """
+        self.samples = []
+        
+        print(f"从 {metadata_file} 加载元数据...")
+        with open(metadata_file, 'r') as f:
+            for i, line in enumerate(f):
+                if max_samples is not None and i >= max_samples:
+                    break
+                    
+                metadata = json.loads(line.strip())
+                self.samples.append(metadata)
+        
+        print(f"加载了 {len(self.samples)} 个样本")
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        
+        # 加载图像张量
+        img_tensor = torch.load(sample["img_path"])
+        
+        return {
+            "img_tensor": img_tensor,
+            "labels": sample["response"],
+            "id": sample["id"]
+        }
 
 def main():
     # 1. 环境变量与 W&B 初始化
-    os.environ["WANDB_PROJECT"] = "RolmOCR-finetune"
+    os.environ["WANDB_PROJECT"] = WANDB_PROJECT
     wandb.init()
 
-    # 2. 参数与超参
-    model_id    = "Qwen/Qwen2.5-VL-2B-Instruct"
-    dataset_id  = "allenai/olmOCR-mix-0225"
-    output_dir  = "./rolmocr_output"
-    epochs      = 3
-    batch_size  = 1
-    lr          = 3e-5
-    max_len     = 4096
+    # 2. 加载数据集
+    metadata_file = os.path.join(DATA_DIR, "metadata.jsonl")
+    if not os.path.exists(metadata_file):
+        print(f"错误: 元数据文件 {metadata_file} 不存在，请先运行 data_prepare.py")
+        return
+        
+    train_dataset = ProcessedOCRDataset(metadata_file, max_samples=MAX_SAMPLES)
+    
+    if len(train_dataset) == 0:
+        print("错误: 没有加载到任何样本，请检查预处理数据")
+        return
+    
+    # 3. 加载分词器与模型
+    print(f"加载模型和分词器: {MODEL_ID}")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-    # 3. 加载数据集并预处理
-    ds = load_dataset(dataset_id, "00_documents", split="train_s2pdf")  # Parquet 格式 OCR 数据集:contentReference[oaicite:6]{index=6}
-    ds = ds.map(lambda x: preprocess_example(x), remove_columns=ds.column_names)
-
-    # 4. 分词器与模型加载
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)  # 远程自定义加载:contentReference[oaicite:7]{index=7}
-    model     = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True)
-
-    # 5. 数据 collator
+    # 4. 数据 collator
     data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
 
-    # 6. TrainingArguments 配置（混合精度 + W&B + TensorBoard）
+    # 5. TrainingArguments 配置
     training_args = TrainingArguments(
-        output_dir=output_dir,
-        num_train_epochs=epochs,
-        per_device_train_batch_size=batch_size,
-        learning_rate=lr,
-        fp16=True,  # 混合精度训练:contentReference[oaicite:8]{index=8}
-        logging_steps=100,
+        output_dir=OUTPUT_DIR,
+        num_train_epochs=EPOCHS,
+        per_device_train_batch_size=BATCH_SIZE,
+        learning_rate=LEARNING_RATE,
+        fp16=USE_FP16,
+        logging_steps=LOGGING_STEPS,
         evaluation_strategy="steps",
-        eval_steps=500,
+        eval_steps=EVAL_STEPS,
         save_strategy="steps",
-        save_steps=500,
-        report_to=["wandb","tensorboard"],  # 一行开启 W&B + TB:contentReference[oaicite:9]{index=9}
+        save_steps=SAVE_STEPS,
+        report_to=["wandb", "tensorboard"],
         load_best_model_at_end=True,
         greater_is_better=False,
         metric_for_best_model="loss",
     )
 
-    # 7. Trainer 实例化
+    # 6. Trainer 实例化
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=ds,
+        train_dataset=train_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
         callbacks=[WandbCallback, TensorBoardCallback]
     )
 
-    # 8. 开始训练
-    trainer.train()
-
-    # 9. 保存模型与 Tokenizer
-    trainer.save_model(output_dir)
-    tokenizer.save_pretrained(output_dir)
-    print(f"训练完成，模型保存在 {output_dir}")
+    # 7. 开始训练
+    print("开始训练...")
+    try:
+        trainer.train()
+        
+        # 8. 保存模型与 Tokenizer
+        trainer.save_model(OUTPUT_DIR)
+        tokenizer.save_pretrained(OUTPUT_DIR)
+        print(f"训练完成，模型保存在 {OUTPUT_DIR}")
+    except Exception as e:
+        print(f"训练过程中出错: {e}")
 
 if __name__ == "__main__":
     main()

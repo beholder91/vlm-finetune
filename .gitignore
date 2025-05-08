@@ -2,3 +2,5 @@ wandb/
 tensorboard/
 
 .DS_Store
+
+processed_data/
