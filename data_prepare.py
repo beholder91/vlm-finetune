@@ -12,6 +12,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 import pickle
 import base64
+import gc  # 导入垃圾回收模块
 
 fitz.TOOLS.mupdf_display_errors(False)
 
@@ -35,12 +36,14 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
     try:
         # 从本地读取PDF (每个PDF就是单页)
         pdf_path = os.path.join(PDF_DIR, f"{pdf_id}.pdf")
-        pdf_doc = fitz.open(pdf_path)
-        page = pdf_doc[0]  # 只有一页，直接取第一页
         
-        # 直接将PDF页面转换为PIL图像
-        pix = page.get_pixmap()
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        # 使用with语句打开PDF文件，确保自动关闭
+        with fitz.open(pdf_path) as pdf_doc:
+            page = pdf_doc[0]  # 只有一页，直接取第一页
+            
+            # 直接将PDF页面转换为PIL图像
+            pix = page.get_pixmap()
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         
         # 随机旋转
         if random.random() < rotation_prob:
@@ -135,6 +138,10 @@ def prepare_dataset():
             print(f"处理样本时出错: {e}, ID: {example['id']}")
             error_count += 1
             
+        # 每处理100个样本进行一次垃圾回收
+        if (i + 1) % 100 == 0:
+            gc.collect()
+            
         # 定期输出进度
         if (i + 1) % 1000 == 0:
             print(f"已处理 {i+1}/{total} 个样本，成功: {len(processed_samples)}，失败: {error_count}")
@@ -163,34 +170,42 @@ def prepare_dataset():
         }, f, indent=2, ensure_ascii=False)
     
     print(f"数据集已保存到: {OUTPUT_DATASET_PATH}")
+    print(f"您现在可以在训练脚本中使用以下代码加载此数据集:")
+    print(f"import pickle")
+    print(f"with open('{OUTPUT_DATASET_PATH}', 'rb') as f:")
+    print(f"    train_dataset = pickle.load(f)")
+    print(f"# 数据集中的图像已经处理好，可以直接用于训练")
 
 def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> str:
     try:
-        # 打开PDF文件
-        pdf_doc = fitz.open(pdf_path)
-        page = pdf_doc[0]
-        
-        # 获取页面尺寸
-        rect = page.rect
-        width, height = rect.width, rect.height
-        longest_dim = max(width, height)
-        
-        # 计算缩放比例
-        scale = target_longest_dim / longest_dim
-        
-        # 设置渲染参数
-        matrix = fitz.Matrix(scale, scale)
-        
-        # 渲染为像素图
-        pix = page.get_pixmap(matrix=matrix)
-        
-        # 转换为PIL图像
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        # 使用with语句打开PDF文件
+        with fitz.open(pdf_path) as pdf_doc:
+            page = pdf_doc[0]
+            
+            # 获取页面尺寸
+            rect = page.rect
+            width, height = rect.width, rect.height
+            longest_dim = max(width, height)
+            
+            # 计算缩放比例
+            scale = target_longest_dim / longest_dim
+            
+            # 设置渲染参数
+            matrix = fitz.Matrix(scale, scale)
+            
+            # 渲染为像素图
+            pix = page.get_pixmap(matrix=matrix)
+            
+            # 转换为PIL图像
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         
         # 保存为PNG并转换为Base64
         buffer = io.BytesIO()
         img.save(buffer, format="PNG")
         img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        
+        # 主动调用垃圾回收
+        gc.collect()
         
         return img_base64
         
