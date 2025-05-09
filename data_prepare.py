@@ -11,13 +11,16 @@ import fitz  # PyMuPDF
 from datasets import load_dataset
 from tqdm import tqdm
 import pickle
+import base64
+
+fitz.TOOLS.mupdf_display_errors(False)
 
 # 配置参数 - 可以直接在此修改
 LOCAL_DATASET_PATH = "./olmOCR-mix-0225/train-s2pdf.parquet"
 PDF_DIR = "./olmOCR-mix-0225/pdfs"
 OUTPUT_DIR = "./processed_data"
 OUTPUT_DATASET_PATH = os.path.join(OUTPUT_DIR, "ocr_pytorch_dataset.pkl")
-MAX_SAMPLES = 1000  # 修改为None可处理全部样本
+MAX_SAMPLES = None  # 修改为None可处理全部样本
 MAX_SIDE = 1024  # 图像最大边长
 
 
@@ -133,7 +136,7 @@ def prepare_dataset():
             error_count += 1
             
         # 定期输出进度
-        if (i + 1) % 100 == 0:
+        if (i + 1) % 1000 == 0:
             print(f"已处理 {i+1}/{total} 个样本，成功: {len(processed_samples)}，失败: {error_count}")
     
     processed_count = len(processed_samples)
@@ -165,6 +168,50 @@ def prepare_dataset():
     print(f"with open('{OUTPUT_DATASET_PATH}', 'rb') as f:")
     print(f"    train_dataset = pickle.load(f)")
     print(f"# 数据集中的图像已经处理好，可以直接用于训练")
+
+def render_pdf_to_base64png(pdf_path: str, page_num: int = 0, target_longest_dim: int = 2048) -> str:
+    """
+    将PDF页面转换为Base64编码的PNG图像
+    
+    Args:
+        pdf_path: PDF文件路径
+        page_num: 页码（从0开始）
+        target_longest_dim: 目标图像的最长边尺寸
+        
+    Returns:
+        Base64编码的PNG图像字符串
+    """
+    try:
+        # 打开PDF文件
+        pdf_doc = fitz.open(pdf_path)
+        page = pdf_doc[page_num]
+        
+        # 获取页面尺寸
+        rect = page.rect
+        width, height = rect.width, rect.height
+        longest_dim = max(width, height)
+        
+        # 计算缩放比例
+        scale = target_longest_dim / longest_dim
+        
+        # 设置渲染参数
+        matrix = fitz.Matrix(scale, scale)
+        
+        # 渲染为像素图
+        pix = page.get_pixmap(matrix=matrix)
+        
+        # 转换为PIL图像
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        
+        # 保存为PNG并转换为Base64
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        
+        return img_base64
+        
+    except Exception as e:
+        raise RuntimeError(f"PDF转换为Base64 PNG时出错: {e}")
 
 if __name__ == "__main__":
     prepare_dataset() 
