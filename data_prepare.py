@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import fitz  # PyMuPDF
-from datasets import load_dataset
+from datasets import load_dataset, Dataset as HFDataset
 from tqdm import tqdm
 import pickle
 import base64
@@ -21,7 +21,7 @@ LOCAL_DATASET_PATH = "./olmOCR-mix-0225/train-s2pdf.parquet"
 PDF_DIR = "./olmOCR-mix-0225/pdfs"
 OUTPUT_DIR = "./processed_data"
 OUTPUT_DATASET_PATH = os.path.join(OUTPUT_DIR, "ocr_pytorch_dataset.pkl")
-MAX_SAMPLES = None  # 修改为None可处理全部样本
+MAX_SAMPLES = 1000  # 修改为None可处理全部样本
 MAX_SIDE = 1024  # 图像最大边长
 
 
@@ -32,7 +32,7 @@ image_transform = transforms.Compose([
 ])
 
 def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
-    """处理单个图像，返回处理后的PIL图像对象"""
+    """处理单个图像，直接返回Tensor和尺寸信息，不返回PIL图像"""
     try:
         # 从本地读取PDF (每个PDF就是单页)
         pdf_path = os.path.join(PDF_DIR, f"{pdf_id}.pdf")
@@ -55,12 +55,19 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
         scale = max_side / max(w, h)
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
         
-        # 返回处理后的PIL图像对象
+        # 转换为Tensor并立即释放PIL图像
+        tensor = image_transform(img)
+        width, height = img.width, img.height
+        
+        # 释放PIL图像
+        del img
+        
+        # 返回处理后的结果，不再保留PIL图像
         return {
             "success": True,
-            "image": img,
-            "width": img.width,
-            "height": img.height
+            "tensor": tensor,
+            "width": width,
+            "height": height
         }
     
     except Exception as e:
@@ -74,8 +81,8 @@ class OCRDataset(Dataset):
         """初始化数据集
         
         Args:
-            samples: 样本列表，每个样本是包含image和response的字典
-            transform: 图像转换函数
+            samples: 样本列表，每个样本是包含tensor和response的字典
+            transform: 图像转换函数(此处已经在预处理阶段使用了)
         """
         self.samples = samples
         self.transform = transform
@@ -86,23 +93,40 @@ class OCRDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
         
-        # 获取图像并应用转换
-        img = sample["image"]
-        if self.transform:
-            img_tensor = self.transform(img)
-        else:
-            img_tensor = transforms.ToTensor()(img)
-        
         return {
-            "image": img_tensor,
+            "image": sample["tensor"],
             "text": sample["response"],
             "id": sample["id"],
             "width": sample["width"],
             "height": sample["height"]
         }
 
+def process_example(example, process_images=True):
+    """单个或批量样本处理函数，用于HF Datasets的map方法"""
+    if not process_images:
+        return example
+        
+    result = process_image(example["id"])
+    
+    if result["success"]:
+        return {
+            "id": example["id"],
+            "response": example["response"],
+            "tensor": result["tensor"],
+            "width": result["width"],
+            "height": result["height"],
+            "success": True
+        }
+    else:
+        return {
+            "id": example["id"],
+            "response": example["response"],
+            "success": False,
+            "error": result.get("error", "未知错误")
+        }
+
 def prepare_dataset():
-    """直接将数据集处理并保存为PyTorch Dataset格式"""
+    """使用流式处理和HF Datasets的map方法处理数据并保存为PyTorch Dataset格式"""
     print(f"加载本地数据集: {LOCAL_DATASET_PATH}")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
@@ -114,44 +138,45 @@ def prepare_dataset():
     total = len(ds)
     print(f"共有 {total} 个样本需要处理")
     
-    # 处理数据并收集有效样本
+    # 使用流式处理和map方法处理数据
     processed_samples = []
     error_count = 0
+    batch_size = 32  # 可根据内存情况调整批处理大小
     
-    for i, example in enumerate(tqdm(ds, desc="处理样本")):
-        try:
-            # 处理图像
-            result = process_image(example["id"])
-            
+    # 流式处理数据集并收集有效样本
+    for i in tqdm(range(0, total, batch_size), desc="处理样本批次"):
+        end_idx = min(i + batch_size, total)
+        batch_ds = ds.select(range(i, end_idx))
+        
+        # 处理当前批次的所有样本
+        processed_batch = [process_example(example) for example in batch_ds]
+        
+        # 收集成功处理的样本
+        for result in processed_batch:
             if result["success"]:
                 processed_samples.append({
-                    "id": example["id"],
-                    "image": result["image"],
-                    "response": example["response"],
+                    "id": result["id"],
+                    "tensor": result["tensor"],
+                    "response": result["response"],
                     "width": result["width"],
                     "height": result["height"]
                 })
             else:
                 error_count += 1
-                
-        except Exception as e:
-            print(f"处理样本时出错: {e}, ID: {example['id']}")
-            error_count += 1
-            
-        # 每处理100个样本进行一次垃圾回收
-        if (i + 1) % 100 == 0:
-            gc.collect()
-            
-        # 定期输出进度
-        if (i + 1) % 1000 == 0:
-            print(f"已处理 {i+1}/{total} 个样本，成功: {len(processed_samples)}，失败: {error_count}")
+        
+        # 手动调用垃圾回收
+        gc.collect()
+        
+        # 每处理10个批次输出一次进度
+        if (i // batch_size + 1) % 10 == 0:
+            print(f"已处理 {end_idx}/{total} 个样本，成功: {len(processed_samples)}，失败: {error_count}")
     
     processed_count = len(processed_samples)
     print(f"数据处理完成. 成功: {processed_count}, 失败: {error_count}")
     
     # 创建PyTorch Dataset
     print(f"创建PyTorch Dataset，包含 {processed_count} 个样本...")
-    ocr_dataset = OCRDataset(processed_samples, transform=image_transform)
+    ocr_dataset = OCRDataset(processed_samples, transform=None)  # 已经转换为tensor，不需要再次转换
     
     # 保存数据集
     print(f"保存数据集到 {OUTPUT_DATASET_PATH}...")
@@ -170,11 +195,6 @@ def prepare_dataset():
         }, f, indent=2, ensure_ascii=False)
     
     print(f"数据集已保存到: {OUTPUT_DATASET_PATH}")
-    print(f"您现在可以在训练脚本中使用以下代码加载此数据集:")
-    print(f"import pickle")
-    print(f"with open('{OUTPUT_DATASET_PATH}', 'rb') as f:")
-    print(f"    train_dataset = pickle.load(f)")
-    print(f"# 数据集中的图像已经处理好，可以直接用于训练")
 
 def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> str:
     try:
@@ -205,6 +225,7 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
         img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
         
         # 主动调用垃圾回收
+        del img
         gc.collect()
         
         return img_base64
