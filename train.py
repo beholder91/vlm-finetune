@@ -15,11 +15,11 @@ from transformers import (
 )
 from transformers.integrations import WandbCallback, TensorBoardCallback
 import wandb
-from datasets import load_from_disk
+import pickle
 
 # 训练参数 - 可直接修改
 MODEL_ID = "Qwen/Qwen2.5-VL-2B-Instruct"
-DATASET_PATH = "./processed_data/ocr_dataset"  # 预处理好的数据集路径
+DATASET_PATH = "./processed_data/ocr_pytorch_dataset.pkl"  # 预处理好的pickle数据集路径
 OUTPUT_DIR = "./rolmocr_output"
 WANDB_PROJECT = "RolmOCR-finetune"
 MAX_SAMPLES = None  # 设置为None表示使用全部样本
@@ -32,46 +32,6 @@ EVAL_STEPS = 500
 SAVE_STEPS = 500
 NUM_WORKERS = 4  # 数据加载的线程数
 
-# 图像预处理转换
-image_transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
-class PreprocessedOCRDataset(Dataset):
-    """包装预处理好的HuggingFace数据集，便于训练使用"""
-    
-    def __init__(self, dataset, transform=None):
-        """初始化数据集
-        
-        Args:
-            dataset: HuggingFace Dataset对象
-            transform: 图像转换函数
-        """
-        self.dataset = dataset
-        self.transform = transform
-        
-        print(f"加载了 {len(dataset)} 个预处理好的样本")
-    
-    def __len__(self):
-        return len(self.dataset)
-    
-    def __getitem__(self, idx):
-        sample = self.dataset[idx]
-        
-        # 获取图像并应用转换
-        img = sample["image"]
-        if self.transform:
-            img_tensor = self.transform(img)
-        else:
-            img_tensor = transforms.ToTensor()(img)
-        
-        return {
-            "img_tensor": img_tensor,
-            "labels": sample["response"],
-            "id": sample["id"]
-        }
-
 def main():
     # 1. 环境变量与 W&B 初始化
     os.environ["WANDB_PROJECT"] = WANDB_PROJECT
@@ -80,22 +40,22 @@ def main():
     # 2. 直接加载预处理好的数据集
     print(f"正在加载预处理好的数据集: {DATASET_PATH}")
     if not os.path.exists(DATASET_PATH):
-        print(f"错误: 数据集目录 {DATASET_PATH} 不存在，请先运行 data_prepare.py")
+        print(f"错误: 数据集文件 {DATASET_PATH} 不存在，请先运行 data_prepare.py")
         return
     
     try:
-        # 加载预处理好的HuggingFace数据集
-        hf_dataset = load_from_disk(DATASET_PATH)
+        # 加载预处理好的PyTorch数据集
+        with open(DATASET_PATH, 'rb') as f:
+            train_dataset = pickle.load(f)
         
         # 如果需要限制样本数
-        if MAX_SAMPLES is not None and MAX_SAMPLES < len(hf_dataset):
-            hf_dataset = hf_dataset.select(range(MAX_SAMPLES))
+        if MAX_SAMPLES is not None and MAX_SAMPLES < len(train_dataset):
+            # 创建一个子集
+            indices = torch.randperm(len(train_dataset))[:MAX_SAMPLES]
+            subset = torch.utils.data.Subset(train_dataset, indices)
+            train_dataset = subset
         
-        # 包装为PyTorch Dataset
-        train_dataset = PreprocessedOCRDataset(
-            dataset=hf_dataset,
-            transform=image_transform
-        )
+        print(f"成功加载数据集，包含 {len(train_dataset)} 个样本")
         
     except Exception as e:
         print(f"加载数据集出错: {e}")

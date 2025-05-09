@@ -163,28 +163,12 @@ def prepare_dataset():
         }, f, indent=2, ensure_ascii=False)
     
     print(f"数据集已保存到: {OUTPUT_DATASET_PATH}")
-    print(f"您现在可以在训练脚本中使用以下代码加载此数据集:")
-    print(f"import pickle")
-    print(f"with open('{OUTPUT_DATASET_PATH}', 'rb') as f:")
-    print(f"    train_dataset = pickle.load(f)")
-    print(f"# 数据集中的图像已经处理好，可以直接用于训练")
 
-def render_pdf_to_base64png(pdf_path: str, page_num: int = 0, target_longest_dim: int = 2048) -> str:
-    """
-    将PDF页面转换为Base64编码的PNG图像
-    
-    Args:
-        pdf_path: PDF文件路径
-        page_num: 页码（从0开始）
-        target_longest_dim: 目标图像的最长边尺寸
-        
-    Returns:
-        Base64编码的PNG图像字符串
-    """
+def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> str:
     try:
         # 打开PDF文件
         pdf_doc = fitz.open(pdf_path)
-        page = pdf_doc[page_num]
+        page = pdf_doc[0]
         
         # 获取页面尺寸
         rect = page.rect
