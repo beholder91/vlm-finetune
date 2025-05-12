@@ -3,6 +3,7 @@
 
 import os
 import torch
+import time  # 添加time模块
 from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
@@ -23,10 +24,10 @@ OUTPUT_DIR = "./rolmocr_output"
 WANDB_PROJECT = "RolmOCR-finetune"
 MAX_SAMPLES = None  # 设置为None表示使用全部样本
 EPOCHS = 3
-BATCH_SIZE = 1  # 每个GPU的批处理大小
+BATCH_SIZE = 4  # 每个GPU的批处理大小
 LEARNING_RATE = 3e-5
 USE_FP16 = True
-LOGGING_STEPS = 100
+LOGGING_STEPS = 10
 SAVE_STEPS = 500
 NUM_WORKERS = 4  # 数据加载的线程数
 GRADIENT_ACCUMULATION_STEPS = 8  # 梯度累积步数，减少内存需求
@@ -94,16 +95,26 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         data_collator=data_collator,
-        callbacks=[WandbCallback]
     )
 
     # 8. 使用accelerator包装训练过程
     with accelerator.main_process_first():
         if accelerator.is_main_process:
             print("开始训练...")
+            # 尝试加载一个批次，检查数据加载速度
+            try:
+                batch_start = time.time()
+                first_batch = next(iter(dataloader))
+                print(f"首批数据加载用时: {time.time() - batch_start:.2f}秒")
+            except Exception as e:
+                print(f"加载首批数据失败: {e}")
+                
         try:
             # 通过Trainer进行训练
+            train_start = time.time()
             trainer.train()
+            if accelerator.is_main_process:
+                print(f"训练总用时: {time.time() - train_start:.2f}秒")
             
             # 保存模型与处理器
             if accelerator.is_main_process:

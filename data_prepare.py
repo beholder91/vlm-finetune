@@ -26,7 +26,7 @@ image_transform = transforms.Compose([
 ])
 
 def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
-    """处理单个图像，直接返回Tensor和尺寸信息，不返回PIL图像"""
+    """处理单个图像，确保所有图像具有相同尺寸"""
     try:
         # 从本地读取PDF (每个PDF就是单页)
         pdf_path = os.path.join(PDF_DIR, f"{pdf_id}.pdf")
@@ -47,21 +47,30 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
         # Resize: 最长边为 max_side
         w, h = img.size
         scale = max_side / max(w, h)
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        new_w, new_h = int(w * scale), int(h * scale)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        
+        # 创建一个固定大小的黑色背景图像
+        padded_img = Image.new("RGB", (max_side, max_side), (0, 0, 0))
+        
+        # 将调整大小后的图像粘贴到中心位置
+        paste_x = (max_side - new_w) // 2
+        paste_y = (max_side - new_h) // 2
+        padded_img.paste(img, (paste_x, paste_y))
         
         # 转换为Tensor并立即释放PIL图像
-        tensor = image_transform(img)
-        width, height = img.width, img.height
+        tensor = image_transform(padded_img)
         
         # 释放PIL图像
         del img
+        del padded_img
         
         # 返回处理后的结果，不再保留PIL图像
         return {
             "success": True,
             "tensor": tensor,
-            "width": width,
-            "height": height
+            "width": max_side,
+            "height": max_side
         }
     
     except Exception as e:
@@ -109,13 +118,13 @@ class DynamicOCRDataset(Dataset):
                 "height": result["height"]
             }
         else:
-            # 处理失败时，提供一个空白图像
+            # 处理失败时，提供一个空白图像，与成功处理的图像大小一致
             return {
-                "image": torch.zeros((3, 224, 224)),
+                "image": torch.zeros((3, self.max_side, self.max_side)),
                 "text": example["response"],
                 "id": example["id"],
-                "width": 224,
-                "height": 224
+                "width": self.max_side,
+                "height": self.max_side
             }
 
 def create_dataloader(batch_size=8, num_workers=4, shuffle=True, max_samples=None):
@@ -160,13 +169,25 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
             # 转换为PIL图像
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         
+        # 调整大小，保持比例
+        new_w, new_h = img.width, img.height
+        
+        # 创建一个固定大小的黑色背景图像
+        padded_img = Image.new("RGB", (target_longest_dim, target_longest_dim), (0, 0, 0))
+        
+        # 将调整大小后的图像粘贴到中心位置
+        paste_x = (target_longest_dim - new_w) // 2
+        paste_y = (target_longest_dim - new_h) // 2
+        padded_img.paste(img, (paste_x, paste_y))
+        
         # 保存为PNG并转换为Base64
         buffer = io.BytesIO()
-        img.save(buffer, format="PNG")
+        padded_img.save(buffer, format="PNG")
         img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
         
         # 主动调用垃圾回收
         del img
+        del padded_img
         gc.collect()
         
         return img_base64
