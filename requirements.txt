@@ -1,0 +1,6 @@
+conda install -c nvidia cuda-toolkit=12.8
+
+pip install vllm tensorboard accelerate deepspeed wandb datasets pymupdf
+
+
+

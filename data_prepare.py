@@ -8,22 +8,16 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import fitz  # PyMuPDF
-from datasets import load_dataset, Dataset as HFDataset
-from tqdm import tqdm
-import pickle
-import base64
+from datasets import load_dataset
 import gc  # 导入垃圾回收模块
+import base64
 
 fitz.TOOLS.mupdf_display_errors(False)
 
 # 配置参数 - 可以直接在此修改
 LOCAL_DATASET_PATH = "./olmOCR-mix-0225/train-s2pdf.parquet"
 PDF_DIR = "./olmOCR-mix-0225/pdfs"
-OUTPUT_DIR = "./processed_data"
-OUTPUT_DATASET_PATH = os.path.join(OUTPUT_DIR, "ocr_pytorch_dataset.pkl")
-MAX_SAMPLES = 1000  # 修改为None可处理全部样本
 MAX_SIDE = 1024  # 图像最大边长
-
 
 # 图像预处理转换
 image_transform = transforms.Compose([
@@ -74,127 +68,74 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
         print(f"处理图像时出错: {e}, PDF ID: {pdf_id}")
         return {"success": False, "error": str(e)}
 
-class OCRDataset(Dataset):
-    """OCR数据集PyTorch实现"""
+class DynamicOCRDataset(Dataset):
+    """动态OCR数据集，实时处理图像数据"""
     
-    def __init__(self, samples, transform=None):
+    def __init__(self, parquet_path, pdf_dir, max_samples=None, max_side=MAX_SIDE):
         """初始化数据集
         
         Args:
-            samples: 样本列表，每个样本是包含tensor和response的字典
-            transform: 图像转换函数(此处已经在预处理阶段使用了)
+            parquet_path: parquet文件路径
+            pdf_dir: PDF文件目录
+            max_samples: 最大样本数，None表示使用全部数据
+            max_side: 图像最大边长
         """
-        self.samples = samples
-        self.transform = transform
+        self.pdf_dir = pdf_dir
+        self.max_side = max_side
         
+        # 加载原始数据集
+        self.ds = load_dataset("parquet", data_files=parquet_path)["train"]
+        if max_samples is not None:
+            self.ds = self.ds.select(range(min(max_samples, len(self.ds))))
+        
+        print(f"加载数据集: {parquet_path}，共{len(self.ds)}个样本")
+    
     def __len__(self):
-        return len(self.samples)
+        return len(self.ds)
     
     def __getitem__(self, idx):
-        sample = self.samples[idx]
+        # 获取样本
+        example = self.ds[idx]
         
-        return {
-            "image": sample["tensor"],
-            "text": sample["response"],
-            "id": sample["id"],
-            "width": sample["width"],
-            "height": sample["height"]
-        }
+        # 处理图像
+        result = process_image(example["id"])
+        
+        if result["success"]:
+            return {
+                "image": result["tensor"],
+                "text": example["response"],
+                "id": example["id"],
+                "width": result["width"],
+                "height": result["height"]
+            }
+        else:
+            # 处理失败时，提供一个空白图像
+            return {
+                "image": torch.zeros((3, 224, 224)),
+                "text": example["response"],
+                "id": example["id"],
+                "width": 224,
+                "height": 224
+            }
 
-def process_example(example, process_images=True):
-    """单个或批量样本处理函数，用于HF Datasets的map方法"""
-    if not process_images:
-        return example
-        
-    result = process_image(example["id"])
+def create_dataloader(batch_size=8, num_workers=4, shuffle=True, max_samples=None):
+    """创建动态数据加载器"""
+    dataset = DynamicOCRDataset(
+        parquet_path=LOCAL_DATASET_PATH,
+        pdf_dir=PDF_DIR,
+        max_samples=max_samples,
+        max_side=MAX_SIDE
+    )
     
-    if result["success"]:
-        return {
-            "id": example["id"],
-            "response": example["response"],
-            "tensor": result["tensor"],
-            "width": result["width"],
-            "height": result["height"],
-            "success": True
-        }
-    else:
-        return {
-            "id": example["id"],
-            "response": example["response"],
-            "success": False,
-            "error": result.get("error", "未知错误")
-        }
-
-def prepare_dataset():
-    """使用流式处理和HF Datasets的map方法处理数据并保存为PyTorch Dataset格式"""
-    print(f"加载本地数据集: {LOCAL_DATASET_PATH}")
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=True
+    )
     
-    # 加载原始数据集
-    ds = load_dataset("parquet", data_files=LOCAL_DATASET_PATH)["train"]
-    if MAX_SAMPLES is not None:
-        ds = ds.select(range(min(MAX_SAMPLES, len(ds))))
-    
-    total = len(ds)
-    print(f"共有 {total} 个样本需要处理")
-    
-    # 使用流式处理和map方法处理数据
-    processed_samples = []
-    error_count = 0
-    batch_size = 32  # 可根据内存情况调整批处理大小
-    
-    # 流式处理数据集并收集有效样本
-    for i in tqdm(range(0, total, batch_size), desc="处理样本批次"):
-        end_idx = min(i + batch_size, total)
-        batch_ds = ds.select(range(i, end_idx))
-        
-        # 处理当前批次的所有样本
-        processed_batch = [process_example(example) for example in batch_ds]
-        
-        # 收集成功处理的样本
-        for result in processed_batch:
-            if result["success"]:
-                processed_samples.append({
-                    "id": result["id"],
-                    "tensor": result["tensor"],
-                    "response": result["response"],
-                    "width": result["width"],
-                    "height": result["height"]
-                })
-            else:
-                error_count += 1
-        
-        # 手动调用垃圾回收
-        gc.collect()
-        
-        # 每处理10个批次输出一次进度
-        if (i // batch_size + 1) % 10 == 0:
-            print(f"已处理 {end_idx}/{total} 个样本，成功: {len(processed_samples)}，失败: {error_count}")
-    
-    processed_count = len(processed_samples)
-    print(f"数据处理完成. 成功: {processed_count}, 失败: {error_count}")
-    
-    # 创建PyTorch Dataset
-    print(f"创建PyTorch Dataset，包含 {processed_count} 个样本...")
-    ocr_dataset = OCRDataset(processed_samples, transform=None)  # 已经转换为tensor，不需要再次转换
-    
-    # 保存数据集
-    print(f"保存数据集到 {OUTPUT_DATASET_PATH}...")
-    with open(OUTPUT_DATASET_PATH, 'wb') as f:
-        pickle.dump(ocr_dataset, f)
-    
-    # 保存一个描述文件，方便训练脚本了解数据集结构
-    with open(os.path.join(OUTPUT_DIR, "dataset_info.json"), "w") as f:
-        json.dump({
-            "total_samples": total,
-            "processed_samples": processed_count,
-            "failed_samples": error_count,
-            "dataset_path": OUTPUT_DATASET_PATH,
-            "image_size": f"变化大小，最大边长为 {MAX_SIDE} 像素",
-            "pdf_converter": "PyMuPDF"
-        }, f, indent=2, ensure_ascii=False)
-    
-    print(f"数据集已保存到: {OUTPUT_DATASET_PATH}")
+    return dataloader, dataset
 
 def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> str:
     try:
@@ -234,4 +175,14 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
         raise RuntimeError(f"PDF转换为Base64 PNG时出错: {e}")
 
 if __name__ == "__main__":
-    prepare_dataset() 
+    # 测试动态数据加载
+    dataloader, dataset = create_dataloader(batch_size=4, num_workers=2, max_samples=10)
+    print(f"创建了动态数据加载器，数据集大小: {len(dataset)}")
+    
+    # 加载一个批次作为示例
+    print("加载一个批次数据...")
+    for batch in dataloader:
+        print(f"批次大小: {len(batch['image'])}")
+        print(f"图像形状: {batch['image'][0].shape}")
+        print(f"文本示例: {batch['text'][0][:50]}...")
+        break 

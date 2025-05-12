@@ -1,79 +1,77 @@
 #!/usr/bin/env python3
-# train.py — RolmOCR 训练脚本，直接加载预处理好的数据集进行训练
+# train.py — RolmOCR 训练脚本，结合Accelerate和Trainer
 
 import os
-import json
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
 from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
+    AutoModelForImageTextToText,
+    AutoProcessor,
     Trainer,
     TrainingArguments,
     DataCollatorWithPadding
 )
-from transformers.integrations import WandbCallback, TensorBoardCallback
+from transformers.integrations import WandbCallback
 import wandb
-import pickle
+from accelerate import Accelerator
+
+# 导入数据处理模块
+from data_prepare import create_dataloader
 
 # 训练参数 - 可直接修改
-MODEL_ID = "Qwen/Qwen2.5-VL-2B-Instruct"
-DATASET_PATH = "./processed_data/ocr_pytorch_dataset.pkl"  # 预处理好的pickle数据集路径
+MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
 OUTPUT_DIR = "./rolmocr_output"
 WANDB_PROJECT = "RolmOCR-finetune"
 MAX_SAMPLES = None  # 设置为None表示使用全部样本
 EPOCHS = 3
-BATCH_SIZE = 1
+BATCH_SIZE = 1  # 每个GPU的批处理大小
 LEARNING_RATE = 3e-5
 USE_FP16 = True
 LOGGING_STEPS = 100
-EVAL_STEPS = 500
 SAVE_STEPS = 500
 NUM_WORKERS = 4  # 数据加载的线程数
+GRADIENT_ACCUMULATION_STEPS = 8  # 梯度累积步数，减少内存需求
 
 def main():
-    # 1. 环境变量与 W&B 初始化
-    os.environ["WANDB_PROJECT"] = WANDB_PROJECT
-    wandb.init()
-
-    # 2. 直接加载预处理好的数据集
-    print(f"正在加载预处理好的数据集: {DATASET_PATH}")
-    if not os.path.exists(DATASET_PATH):
-        print(f"错误: 数据集文件 {DATASET_PATH} 不存在，请先运行 data_prepare.py")
-        return
+    # 1. 初始化 Accelerator (不需要DeepSpeed配置，将通过accelerate config处理)
+    accelerator = Accelerator(
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        log_with="wandb"
+    )
     
-    try:
-        # 加载预处理好的PyTorch数据集
-        with open(DATASET_PATH, 'rb') as f:
-            train_dataset = pickle.load(f)
-        
-        # 如果需要限制样本数
-        if MAX_SAMPLES is not None and MAX_SAMPLES < len(train_dataset):
-            # 创建一个子集
-            indices = torch.randperm(len(train_dataset))[:MAX_SAMPLES]
-            subset = torch.utils.data.Subset(train_dataset, indices)
-            train_dataset = subset
-        
-        print(f"成功加载数据集，包含 {len(train_dataset)} 个样本")
-        
-    except Exception as e:
-        print(f"加载数据集出错: {e}")
-        return
+    # 2. 在主进程中设置 wandb
+    if accelerator.is_main_process:
+        wandb.init(project=WANDB_PROJECT)
+        accelerator.init_trackers(WANDB_PROJECT)
+        print("W&B 初始化完成")
+
+    # 3. 创建动态数据加载器
+    if accelerator.is_main_process:
+        print("创建动态数据加载器...")
+    dataloader, train_dataset = create_dataloader(
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        shuffle=True,
+        max_samples=MAX_SAMPLES
+    )
+    
+    if accelerator.is_main_process:
+        print(f"成功创建数据集，包含 {len(train_dataset)} 个样本")
     
     if len(train_dataset) == 0:
-        print("错误: 没有加载到任何样本，请检查数据集")
+        if accelerator.is_main_process:
+            print("错误: 没有加载到任何样本，请检查数据集")
         return
     
-    # 3. 加载分词器与模型
-    print(f"加载模型和分词器: {MODEL_ID}")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, trust_remote_code=True)
+    # 4. 加载处理器与模型
+    if accelerator.is_main_process:
+        print(f"加载模型和处理器: {MODEL_ID}")
+    processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+    model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-    # 4. 数据 collator
-    data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
+    # 5. 数据 collator
+    data_collator = DataCollatorWithPadding(processor, pad_to_multiple_of=8)
 
-    # 5. TrainingArguments 配置
+    # 6. TrainingArguments 配置 - 不需要指定DeepSpeed配置
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
         num_train_epochs=EPOCHS,
@@ -81,38 +79,43 @@ def main():
         learning_rate=LEARNING_RATE,
         fp16=USE_FP16,
         logging_steps=LOGGING_STEPS,
-        evaluation_strategy="steps",
-        eval_steps=EVAL_STEPS,
         save_strategy="steps",
         save_steps=SAVE_STEPS,
-        report_to=["wandb", "tensorboard"],
-        load_best_model_at_end=True,
-        greater_is_better=False,
-        metric_for_best_model="loss",
-        dataloader_num_workers=NUM_WORKERS,  # 多线程加载数据
+        report_to=["wandb"],
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        gradient_checkpointing=True,
+        # 不需要指定DeepSpeed配置，将由accelerate处理
+        ddp_find_unused_parameters=False,
     )
 
-    # 6. Trainer 实例化
+    # 7. Trainer 实例化
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        tokenizer=tokenizer,
         data_collator=data_collator,
-        callbacks=[WandbCallback, TensorBoardCallback]
+        callbacks=[WandbCallback]
     )
 
-    # 7. 开始训练
-    print("开始训练...")
-    try:
-        trainer.train()
-        
-        # 8. 保存模型与 Tokenizer
-        trainer.save_model(OUTPUT_DIR)
-        tokenizer.save_pretrained(OUTPUT_DIR)
-        print(f"训练完成，模型保存在 {OUTPUT_DIR}")
-    except Exception as e:
-        print(f"训练过程中出错: {e}")
+    # 8. 使用accelerator包装训练过程
+    with accelerator.main_process_first():
+        if accelerator.is_main_process:
+            print("开始训练...")
+        try:
+            # 通过Trainer进行训练
+            trainer.train()
+            
+            # 保存模型与处理器
+            if accelerator.is_main_process:
+                trainer.save_model(OUTPUT_DIR)
+                processor.save_pretrained(OUTPUT_DIR)
+                print(f"训练完成，模型保存在 {OUTPUT_DIR}")
+        except Exception as e:
+            if accelerator.is_main_process:
+                print(f"训练过程中出错: {e}")
+    
+    # 9. 结束跟踪
+    accelerator.end_training()
 
 if __name__ == "__main__":
     main()

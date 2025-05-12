@@ -6,3 +6,10 @@ tensorboard/
 processed_data/
 
 olmOCR-mix-0225/
+
+__pycache__/
+
+.venv/
+
+.env
+
