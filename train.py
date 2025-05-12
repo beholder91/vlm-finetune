@@ -24,10 +24,10 @@ OUTPUT_DIR = "./rolmocr_output"
 WANDB_PROJECT = "RolmOCR-finetune"
 MAX_SAMPLES = None  # 设置为None表示使用全部样本
 EPOCHS = 3
-BATCH_SIZE = 4  # 每个GPU的批处理大小
+BATCH_SIZE = 2  # 每个GPU的批处理大小
 LEARNING_RATE = 3e-5
 USE_FP16 = True
-LOGGING_STEPS = 10
+LOGGING_STEPS = 1
 SAVE_STEPS = 500
 NUM_WORKERS = 4  # 数据加载的线程数
 GRADIENT_ACCUMULATION_STEPS = 8  # 梯度累积步数，减少内存需求
@@ -144,7 +144,7 @@ def main():
     # 8. 使用accelerator包装训练过程
     with accelerator.main_process_first():
         if accelerator.is_main_process:
-            print("开始训练...")
+            print(f"Process {accelerator.process_index}: 即将开始训练...")
             # 尝试加载一个批次，检查数据加载速度
             try:
                 batch_start = time.time()
