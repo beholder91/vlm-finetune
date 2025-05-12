@@ -109,10 +109,14 @@ class DynamicOCRDataset(Dataset):
         # 处理图像
         result = process_image(example["id"])
         
+        # OCR提示语
+        ocr_prompt = "Below is the image of one page of a document. Just return the plain text representation of this document as if you were reading it naturally. Do not hallucinate."
+        
         if result["success"]:
             return {
                 "image": result["tensor"],
-                "text": example["response"],
+                "input_text": ocr_prompt,  # 输入提示
+                "text": example["response"],  # 输出文本
                 "id": example["id"],
                 "width": result["width"],
                 "height": result["height"]
@@ -121,7 +125,8 @@ class DynamicOCRDataset(Dataset):
             # 处理失败时，提供一个空白图像，与成功处理的图像大小一致
             return {
                 "image": torch.zeros((3, self.max_side, self.max_side)),
-                "text": example["response"],
+                "input_text": ocr_prompt,  # 输入提示
+                "text": example["response"],  # 输出文本
                 "id": example["id"],
                 "width": self.max_side,
                 "height": self.max_side

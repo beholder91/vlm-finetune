@@ -69,8 +69,52 @@ def main():
     processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
     model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-    # 5. 数据 collator
-    data_collator = DataCollatorWithPadding(processor, pad_to_multiple_of=8)
+    # 自定义数据整理函数，处理input_text作为输入提示
+    def custom_data_collator(features):
+        # 提取图像和文本
+        images = [feature["image"] for feature in features]
+        input_texts = [feature["input_text"] for feature in features]
+        target_texts = [feature["text"] for feature in features]
+        
+        # 创建以OCR提示作为文本输入的消息格式
+        messages = [
+            [
+                {"role": "user", "content": [
+                    {"type": "text", "text": input_text},
+                    {"type": "image"}
+                ]}
+            ] for input_text in input_texts
+        ]
+        
+        # 使用处理器的聊天模板生成格式化的提示
+        formatted_inputs = [
+            processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+            for msg in messages
+        ]
+        
+        # 对输入和目标进行处理
+        inputs = processor(
+            text=formatted_inputs,
+            images=images,
+            padding=True,
+            return_tensors="pt"
+        )
+        
+        # 处理目标文本
+        with processor.as_target_processor():
+            labels = processor(
+                text=target_texts,
+                padding=True, 
+                return_tensors="pt"
+            ).input_ids
+        
+        # 设置标签
+        inputs["labels"] = labels
+        
+        return inputs
+
+    # 5. 使用自定义数据整理函数替代默认数据整理函数
+    data_collator = custom_data_collator
 
     # 6. TrainingArguments 配置 - 不需要指定DeepSpeed配置
     training_args = TrainingArguments(
