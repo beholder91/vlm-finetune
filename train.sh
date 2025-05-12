@@ -1,0 +1,1 @@
+ACCELERATE_LOG_LEVEL=info accelerate launch --config_file deepspeed_zero3.yaml train.py
