@@ -1,16 +1,49 @@
 compute_environment: LOCAL_MACHINE
+
 deepspeed_config:
+  # ------------------------------
+  # 基础训练参数
+  # ------------------------------
   gradient_accumulation_steps: 8
   gradient_clipping: 1.0
-  offload_optimizer_device: cpu
-  offload_param_device: cpu
-  zero3_init_flag: true
+
+  # ------------------------------
+  # ZeRO Stage 3 配置
+  # ------------------------------
   zero_stage: 3
+  zero3_init_flag: true
+
+  # 关闭所有 CPU offload，让优化器与参数都跑到 GPU 上
+  offload_optimizer_device: none
+  offload_param_device: none
+
+  # 拆分同步，减小一次性传输量
+  reduce_bucket_size: 250000000    # 默认 500M，调小到 250M
+  prefetch_bucket_size: 25000000   # 默认 50M，调小到 25M
+
+  # ------------------------------
+  # 优化器配置
+  # ------------------------------
+  optimizer:
+    type: FusedAdam               # 使用高效的 GPU 端 FusedAdam
+    params:
+      lr: 3e-05
+      betas: [0.9, 0.999]
+      eps: 1e-08
+      weight_decay: 0.01
+
 distributed_type: DEEPSPEED
-downcast_bf16: 'no'
-machine_rank: 0
-main_training_function: main
+
+# ------------------------------
+# 混合精度 & 机器资源
+# ------------------------------
 mixed_precision: fp16
+downcast_bf16: 'no'
+
+machine_rank: 0
 num_machines: 1
 num_processes: 8
 use_cpu: false
+
+# 入口函数
+main_training_function: main

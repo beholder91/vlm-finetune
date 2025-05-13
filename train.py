@@ -22,7 +22,7 @@ from data_prepare import create_dataloader
 MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
 OUTPUT_DIR = "./rolmocr_output"
 WANDB_PROJECT = "RolmOCR-finetune"
-MAX_SAMPLES = None  # 设置为None表示使用全部样本
+MAX_SAMPLES = 100  # 设置为None表示使用全部样本
 EPOCHS = 3
 BATCH_SIZE = 2  # 每个GPU的批处理大小
 LEARNING_RATE = 3e-5
