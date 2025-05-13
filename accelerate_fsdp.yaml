@@ -4,10 +4,10 @@ mixed_precision: bf16
 num_processes: 4
 
 fsdp_config:
-  fsdp_min_num_params: 1e8
-  fsdp_sharding_strategy: FULL_SHARD
-  fsdp_auto_wrap_policy: SIZE_BASED_AUTO_WRAP
-  fsdp_backward_prefetch_policy: BACKWARD_PRE
-  fsdp_state_dict_type: FULL_STATE_DICT
-  offload_params: false
   use_orig_params: false
+  fsdp_sharding_strategy: full_shard
+  fsdp_auto_wrap_policy: size_based_wrap
+  fsdp_min_num_params: 100000000
+  fsdp_backward_prefetch_policy: backward_pre
+  fsdp_state_dict_type: full_state_dict
+

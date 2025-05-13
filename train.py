@@ -130,9 +130,8 @@ def main():
         report_to=["wandb"],
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         gradient_checkpointing=True,
-        ddp_find_unused_parameters=False,
-        fsdp="full_shard auto_wrap_policy=size_based_wrap,min_num_params=100000000"
-    )
+        ddp_find_unused_parameters=False
+        )
 
     # 7. Trainer 实例化
     trainer = Trainer(
