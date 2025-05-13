@@ -26,16 +26,16 @@ MAX_SAMPLES = 256  # 设置为None表示使用全部样本
 EPOCHS = 3
 BATCH_SIZE = 4  # 每个GPU的批处理大小
 LEARNING_RATE = 3e-5
-USE_FP16 = True
+USE_FP16 = True  # 加回FP16设置
 LOGGING_STEPS = 1
 SAVE_STEPS = 500
 NUM_WORKERS = 4  # 数据加载的线程数
-GRADIENT_ACCUMULATION_STEPS = 8  # 梯度累积步数，减少内存需求
+GRADIENT_ACCUMULATION_STEPS = 8  # 加回梯度累积步数设置
 
 def main():
-    # 1. 初始化 Accelerator (不需要DeepSpeed配置，将通过accelerate config处理)
+    # 1. 初始化 Accelerator
     accelerator = Accelerator(
-        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,  # 明确设置数值，不使用"auto"
         log_with="wandb"
     )
     
@@ -116,7 +116,7 @@ def main():
     # 5. 使用自定义数据整理函数替代默认数据整理函数
     data_collator = custom_data_collator
 
-    # 6. TrainingArguments 配置 - 不需要指定DeepSpeed配置
+    # 6. TrainingArguments 配置
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
         num_train_epochs=EPOCHS,
@@ -129,7 +129,6 @@ def main():
         report_to=["wandb"],
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         gradient_checkpointing=True,
-        # 不需要指定DeepSpeed配置，将由accelerate处理
         ddp_find_unused_parameters=False,
     )
 
