@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# train.sh
 set -e
 
-export NCCL_DEBUG=INFO
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export NCCL_SOCKET_IFNAME=bond5
+export NCCL_BLOCKING_WAIT=1
 export NCCL_IB_DISABLE=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export PYTHONFAULTHANDLER=1  # 增加错误跟踪能力
+export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=7200
+export OMP_NUM_THREADS=8
 
 accelerate launch \
-  --config_file deepspeed_zero3.yaml \
-  --num_processes=4 \
+  --config_file accelerate_fsdp.yaml \
+  --main_process_port 29500 \
   train.py

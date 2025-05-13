@@ -14,6 +14,8 @@ from transformers import (
 from transformers.integrations import WandbCallback
 import wandb
 from accelerate import Accelerator
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 
 # 导入数据处理模块
 from data_prepare import create_dataloader
@@ -68,6 +70,19 @@ def main():
         print(f"加载模型和处理器: {MODEL_ID}")
     processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
     model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, trust_remote_code=True)
+    
+    # ↓ 省显存 20-30 %
+    model.gradient_checkpointing_enable()
+
+    # ↓ FSDP 三路分片，按 1e8 参数自动切层
+    auto_wrap = size_based_auto_wrap_policy(min_num_params=int(1e8))
+    model = FSDP(
+        model,
+        auto_wrap_policy=auto_wrap,
+        sharding_strategy="FULL_SHARD",
+        mixed_precision=True,
+        cpu_offload=False
+    )
 
     # 自定义数据整理函数，处理input_text作为输入提示
     def custom_data_collator(features):
