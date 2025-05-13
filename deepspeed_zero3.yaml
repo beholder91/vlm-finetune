@@ -9,7 +9,7 @@ num_processes: 4
 use_cpu: false
 
 deepspeed_config:
-  zero_stage: 3
+  zero_stage: 2
   gradient_accumulation_steps: 8
   gradient_clipping: 1.0
   reduce_bucket_size: 250000000
