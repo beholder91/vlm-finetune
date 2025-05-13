@@ -24,13 +24,13 @@ deepspeed_config:
   # ------------------------------
   # 优化器配置
   # ------------------------------
-  optimizer:
-    type: FusedAdam               # 使用高效的 GPU 端 FusedAdam
-    params:
-      lr: 3e-05
-      betas: [0.9, 0.999]
-      eps: 1e-08
-      weight_decay: 0.01
+  # optimizer:
+  #   type: FusedAdam               # 使用高效的 GPU 端 FusedAdam
+  #   params:
+  #     lr: 3e-05
+  #     betas: [0.9, 0.999]
+  #     eps: 1e-08
+  #     weight_decay: 0.01
 
 distributed_type: DEEPSPEED
 
@@ -42,7 +42,7 @@ downcast_bf16: 'no'
 
 machine_rank: 0
 num_machines: 1
-num_processes: 8
+num_processes: 4
 use_cpu: false
 
 # 入口函数
