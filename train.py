@@ -3,7 +3,10 @@
 
 import os
 import torch
-import time  # 添加time模块
+import time
+import traceback
+from PIL import Image
+import io
 from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
@@ -29,7 +32,7 @@ LEARNING_RATE = 3e-5
 USE_FP16 = True  # 加回FP16设置
 LOGGING_STEPS = 1
 SAVE_STEPS = 500
-NUM_WORKERS = 4  # 数据加载的线程数
+NUM_WORKERS = 0  # 数据加载的线程数
 GRADIENT_ACCUMULATION_STEPS = 8  # 加回梯度累积步数设置
 
 def main():
@@ -72,55 +75,121 @@ def main():
 
     # 自定义数据整理函数，处理input_text作为输入提示
     def custom_data_collator(features):
-        print(f"Inspecting {len(features)} features in this batch.")
+        print(f"[Collator PID {os.getpid()}] Inspecting {len(features)} features in this batch.")
+        valid_features = []
+        problematic_feature_details = []
+
         for i, feature in enumerate(features):
-            if "image" not in feature:
-                print(f"Feature {i} is missing 'image' key. Keys: {feature.keys()}")
-            elif feature["image"] is None:
-                print(f"Feature {i} has 'image' key but its value is None.")
-            # 您也可以打印 feature["image"] 的类型 type(feature["image"])
+            feature_id_str = "UnknownID" # Default ID string
+            is_dict = isinstance(feature, dict)
+            
+            if is_dict:
+                feature_id_str = str(feature.get('id', f'UnknownID_InDict_Idx_{i}'))
+
+                # 新增：处理图像字节流
+                if feature.get("image_is_bytes") and feature.get("image_bytes") is not None:
+                    # print(f"[Collator PID {os.getpid()}] Feature {i} (id: {feature_id_str}) contains image_bytes. Attempting to decode.")
+                    try:
+                        img_bytes = feature["image_bytes"]
+                        pil_image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                        feature["image"] = pil_image # 将解码后的图像存入 "image" 键
+                        del feature["image_bytes"]
+                        del feature["image_is_bytes"]
+                        # print(f"[Collator PID {os.getpid()}] Feature {i} (id: {feature_id_str}) successfully decoded image_bytes to PIL.Image.")
+                    except Exception as e_decode:
+                        problematic_feature_details.append(f"Feature {i} (id: {feature_id_str}) failed to decode image_bytes: {e_decode}. Skipping.")
+                        # print(traceback.format_exc()) # 可选：打印完整堆栈以调试解码错误
+                        continue # 跳过这个损坏的特征
+                elif feature.get("image_is_bytes") and feature.get("image_bytes") is None:
+                    # __getitem__ 表明是字节流，但内容为 None (可能是在 __getitem__ 中处理失败)
+                    problematic_feature_details.append(f"Feature {i} (id: {feature_id_str}) marked as image_bytes but bytes are None. Error from __getitem__: {feature.get('__error__', 'Unknown error in __getitem__')}. Skipping.")
+                    continue
+
+            if not is_dict:
+                problematic_feature_details.append(f"Feature {i} (id: {feature_id_str}) is not a dict, type: {type(feature)}. Skipping.")
+                continue
+
+            # 现在我们知道 feature 是一个 dict
+            # 检查是否包含必须的键，包括 "image" (此时应该已被image_bytes转换而来)
+            keys = feature.keys()
+            missing_keys = []
+            if "image" not in keys: missing_keys.append("image") # 必须检查 "image"，而不是 "image_bytes"
+            if "input_text" not in keys: missing_keys.append("input_text")
+            if "text" not in keys: missing_keys.append("text")
+
+            if missing_keys:
+                # 如果 image_is_bytes 为 True 但 image_bytes 为 None，之前已处理并跳过
+                # 此处 missing_keys 包含 "image" 意味着原始样本就没有 image_is_bytes 标记，或者解码失败后 continue 了
+                problematic_feature_details.append(f"Feature {i} (id: {feature_id_str}) is missing keys: {missing_keys}. All keys: {list(keys)}. Error from __getitem__: {feature.get('__error__', 'N/A')}. Skipping.")
+                continue
+            
+            if feature["image"] is None: # 此时的 feature["image"] 应该是 PIL Image 或 None
+                problematic_feature_details.append(f"Feature {i} (id: {feature_id_str}) has 'image' key, but its value is None. Error from __getitem__: {feature.get('__error__', 'Image became None')}. Skipping.")
+                continue
+            
+            # If we reach here, the feature is considered valid for basic structure
+            valid_features.append(feature)
+
+        if problematic_feature_details:
+            print(f"[Collator PID {os.getpid()}] Problems found in batch features:")
+            for detail in problematic_feature_details:
+                print(f"  - {detail}")
         
-        # 提取图像和文本
-        images = [feature["image"] for feature in features]
-        input_texts = [feature["input_text"] for feature in features]
-        target_texts = [feature["text"] for feature in features]
-        
-        # 创建以OCR提示作为文本输入的消息格式
-        messages = [
-            [
-                {"role": "user", "content": [
-                    {"type": "text", "text": input_text},
-                    {"type": "image"}
-                ]}
-            ] for input_text in input_texts
-        ]
-        
-        # 使用处理器的聊天模板生成格式化的提示
-        formatted_inputs = [
-            processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
-            for msg in messages
-        ]
-        
-        # 对输入和目标进行处理
-        inputs = processor(
-            text=formatted_inputs,
-            images=images,
-            padding=True,
-            return_tensors="pt"
-        )
-        
-        # 处理目标文本
-        with processor.as_target_processor():
-            labels = processor(
-                text=target_texts,
-                padding=True, 
+        if not valid_features:
+            print(f"[Collator PID {os.getpid()}] CRITICAL WARNING: No valid features left in batch after filtering. Original batch size: {len(features)}. Returning empty dict, expect a crash in Trainer.")
+            # To avoid immediate crash *in collator* with empty lists for processor:
+            # Option 1: Raise an error, which will be caught by the main try-except in train.py
+            raise ValueError(f"Custom_data_collator: No valid features in batch after filtering. Original size: {len(features)}.")
+            # Option 2: Return {} - but trainer.train() will likely fail more obscurely.
+            # return {} 
+
+        # Proceed with valid features
+        try:
+            images = [f["image"] for f in valid_features]
+            input_texts = [f["input_text"] for f in valid_features]
+            target_texts = [f["text"] for f in valid_features]
+            
+            # 创建以OCR提示作为文本输入的消息格式
+            messages = [
+                [
+                    {"role": "user", "content": [
+                        {"type": "text", "text": input_text},
+                        {"type": "image"}
+                    ]}
+                ] for input_text in input_texts
+            ]
+            
+            # 使用处理器的聊天模板生成格式化的提示
+            formatted_inputs = [
+                processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+                for msg in messages
+            ]
+            
+            # 对输入和目标进行处理
+            inputs = processor(
+                text=formatted_inputs,
+                images=images,
+                padding=True,
                 return_tensors="pt"
-            ).input_ids
-        
-        # 设置标签
-        inputs["labels"] = labels
-        
-        return inputs
+            )
+            
+            # 处理目标文本
+            with processor.as_target_processor():
+                labels = processor(
+                    text=target_texts,
+                    padding=True, 
+                    return_tensors="pt"
+                ).input_ids
+            
+            # 设置标签
+            inputs["labels"] = labels
+            
+            return inputs
+        except Exception as e_proc:
+            print(f"[Collator PID {os.getpid()}] Error during processor application in collator (with {len(valid_features)} valid features): {e_proc}")
+            print(traceback.format_exc())
+            # Propagate error. This will be caught by the main try-except in train.py's main function.
+            raise e_proc
 
     # 5. 使用自定义数据整理函数替代默认数据整理函数
     data_collator = custom_data_collator
@@ -138,7 +207,8 @@ def main():
         report_to=["wandb"],
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         gradient_checkpointing=True,
-        ddp_find_unused_parameters=False
+        ddp_find_unused_parameters=False,
+        dataloader_num_workers=0
         )
 
     # 7. Trainer 实例化
