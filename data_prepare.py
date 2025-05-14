@@ -369,13 +369,132 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
             except OSError: pass
 
 if __name__ == "__main__":
-    # 测试动态数据加载
-    dataloader, dataset = create_dataloader(batch_size=4, num_workers=0, max_samples=10)
-    print(f"创建了动态数据加载器，数据集大小: {len(dataset)}")
+    # 测试 num_workers=0 的情况
+    print("\n--- Testing with num_workers=0 ---")
+    # 使用较小的 max_samples 以便快速测试
+    dataloader_nw0, dataset_nw0 = create_dataloader(
+        batch_size=2, 
+        num_workers=0, 
+        max_samples=4,  # Reduced for faster testing
+        data_path=LOCAL_DATASET_PATH, 
+        pdf_dir=PDF_DIR, 
+        max_side=MAX_SIDE
+    )
+    print(f"创建了动态数据加载器 (nw=0)，数据集大小: {len(dataset_nw0)}")
+    print("加载一个批次数据 (nw=0)...")
     
-    # 加载一个批次作为示例
-    print("加载一个批次数据...")
-    for batch in dataloader:
-        print(f"批次大小: {len(batch['image_bytes'])}")
-        print(f"文本示例: {batch['text'][0][:50]}...")
-        break 
+    # nw=0 的详细检查
+    processed_batches_nw0 = 0
+    for i, batch_data_nw0 in enumerate(dataloader_nw0):
+        print(f"\n--- Batch {i} (nw=0) ---")
+        print(f"Type of batch_data: {type(batch_data_nw0)}")
+        if isinstance(batch_data_nw0, dict):
+            print(f"Keys in batch_data: {list(batch_data_nw0.keys())}")
+            
+            # 详细检查 image_bytes
+            if "image_bytes" in batch_data_nw0:
+                print(f"Length of image_bytes list: {len(batch_data_nw0['image_bytes'])}")
+                if batch_data_nw0['image_bytes'] and batch_data_nw0['image_bytes'][0] is not None:
+                    first_image_bytes_sample = batch_data_nw0['image_bytes'][0]
+                    print(f"Type of first image_bytes sample: {type(first_image_bytes_sample)}")
+                    if isinstance(first_image_bytes_sample, bytes):
+                        print(f"Size of first image_bytes sample: {len(first_image_bytes_sample)} bytes")
+                        try:
+                            img = Image.open(io.BytesIO(first_image_bytes_sample))
+                            print(f"  Successfully decoded first image_bytes to PIL Image. Size: {img.size}, Mode: {img.mode}")
+                        except Exception as e_decode:
+                            print(f"  ERROR decoding first image_bytes: {e_decode}")
+                    else:
+                        print(f"  First image_bytes sample is NOT bytes, but {type(first_image_bytes_sample)}")
+                else:
+                    print("  First image_bytes sample is None or list is empty.")
+            else:
+                print("  'image_bytes' key NOT found in batch_data.")
+
+            # 检查其他所有预期的键
+            expected_keys = ["text", "id", "input_text", "image_is_bytes", "width", "height", "__error__"]
+            for k in expected_keys:
+                if k in batch_data_nw0:
+                    # Safely access the first element if it's a list and not empty
+                    value_list = batch_data_nw0[k]
+                    example_value = "N/A"
+                    if isinstance(value_list, list):
+                        if value_list: # List is not empty
+                            example_value = str(value_list[0])[:100] # Take first item, convert to str, truncate
+                        else: # List is empty
+                            example_value = "[] (empty list)"
+                    else: # Not a list
+                         example_value = str(value_list)[:100]
+
+
+                    print(f"  Key '{k}': Present. Type: {type(value_list)}. Example/Value[0]: {example_value}")
+                elif k != "__error__": # __error__ is optional
+                    print(f"  Key '{k}': MISSING")
+                elif k == "__error__" and k not in batch_data_nw0:
+                     print(f"  Key '{k}': Not present (which is good if no error)")
+
+
+        else:
+            print(f"batch_data (nw=0) is not a dict, it's: {batch_data_nw0}")
+        
+        processed_batches_nw0 += 1
+        if processed_batches_nw0 >= 1: # 只检查第一个批次进行详细打印
+            break
+    if processed_batches_nw0 == 0:
+        print("  (nw=0) No batches were processed from dataloader_nw0.")
+
+    # 测试 num_workers=2 (或您脚本中默认的) 的情况
+    print("\n--- Testing with num_workers=2 ---")
+    dataloader_nw2, dataset_nw2 = create_dataloader(
+        batch_size=2, 
+        num_workers=2, 
+        max_samples=4, # Reduced for faster testing
+        data_path=LOCAL_DATASET_PATH, 
+        pdf_dir=PDF_DIR, 
+        max_side=MAX_SIDE
+    )
+    print(f"创建了动态数据加载器 (nw=2)，数据集大小: {len(dataset_nw2)}")
+    print("加载一个批次数据 (nw=2)...")
+    
+    processed_batches_nw2 = 0
+    for i, batch_data_nw2 in enumerate(dataloader_nw2):
+        print(f"\n--- Batch {i} (nw=2) ---")
+        print(f"Type of batch_data: {type(batch_data_nw2)}")
+        if isinstance(batch_data_nw2, dict):
+            print(f"Keys in batch_data: {list(batch_data_nw2.keys())}")
+            
+            if "image_bytes" in batch_data_nw2:
+                print(f"Length of image_bytes list: {len(batch_data_nw2['image_bytes'])}")
+                if batch_data_nw2['image_bytes'] and batch_data_nw2['image_bytes'][0] is not None:
+                    first_image_bytes_sample_nw2 = batch_data_nw2['image_bytes'][0]
+                    print(f"Type of first image_bytes sample: {type(first_image_bytes_sample_nw2)}")
+                    if isinstance(first_image_bytes_sample_nw2, bytes):
+                        print(f"Size of first image_bytes sample: {len(first_image_bytes_sample_nw2)} bytes")
+                        try:
+                            img_nw2 = Image.open(io.BytesIO(first_image_bytes_sample_nw2))
+                            print(f"  Successfully decoded first image_bytes to PIL Image. Size: {img_nw2.size}, Mode: {img_nw2.mode}")
+                        except Exception as e_decode_nw2:
+                            print(f"  ERROR decoding first image_bytes (nw=2): {e_decode_nw2}")
+                    else:
+                        print(f"  First image_bytes sample (nw=2) is NOT bytes, but {type(first_image_bytes_sample_nw2)}")
+
+                else:
+                    print("  First image_bytes sample (nw=2) is None or list is empty.")
+            else:
+                 print("  'image_bytes' key NOT found in batch_data (nw=2).")
+            
+            # 简化的其他键检查 (nw=2)
+            for k_nw2 in ["text", "id", "input_text"]:
+                 if k_nw2 in batch_data_nw2:
+                     print(f"  Key '{k_nw2}' (nw=2): Present")
+                 else:
+                     print(f"  Key '{k_nw2}' (nw=2): MISSING")
+
+        else:
+            print(f"batch_data (nw=2) is not a dict, it's: {batch_data_nw2}")
+
+        processed_batches_nw2 +=1
+        if processed_batches_nw2 >= 1: # 只检查第一个批次
+            break
+    if processed_batches_nw2 == 0:
+        print("  (nw=2) No batches were processed from dataloader_nw2.") 
