@@ -27,13 +27,13 @@ OUTPUT_DIR = "./rolmocr_output"
 WANDB_PROJECT = "RolmOCR-finetune"
 MAX_SAMPLES = 256  # 设置为None表示使用全部样本
 EPOCHS = 3
-BATCH_SIZE = 4  # 每个GPU的批处理大小
+BATCH_SIZE = 2  # 每个GPU的批处理大小
 LEARNING_RATE = 3e-5
 USE_FP16 = True  # 加回FP16设置
 LOGGING_STEPS = 1
 SAVE_STEPS = 500
 NUM_WORKERS = 0  # 数据加载的线程数
-GRADIENT_ACCUMULATION_STEPS = 8  # 加回梯度累积步数设置
+GRADIENT_ACCUMULATION_STEPS = 16  # 加回梯度累积步数设置
 
 def main():
     # 1. 初始化 Accelerator
