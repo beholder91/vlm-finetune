@@ -10,7 +10,10 @@ def load_local_parquet(path: str):
 dataset = load_local_parquet("./olmOCR-mix-0225/train-s2pdf.parquet")
 print(type(dataset[0]["response"]))
 
-
+for i in dataset:
+    if i["id"] == "373ad1790a210225249c1f277f5612a8ca5baec6-27":
+        print(i["response"])
+        break
 # import pandas as pd
 # df = pd.read_parquet("./olmOCR-mix-0225/train-s2pdf.parquet")
 # print(df.info())

@@ -10,6 +10,7 @@ import base64
 import traceback
 import subprocess
 import tempfile
+import torch
 
 # fitz.TOOLS.mupdf_display_errors(False) # <--- 移除
 
@@ -70,7 +71,6 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
             if not os.path.exists(generated_ppm_path) and result.returncode == 0 :
                  error_message += f" Output PPM file {generated_ppm_path} not found despite pdftoppm success."
             print(f"[PID {os.getpid()}] process_image: {error_message}")
-            # 清理可能的临时文件前缀(如果NamedTemporaryFile创建了空文件)
             if os.path.exists(temp_ppm_prefix + ".ppm") and temp_ppm_prefix.endswith(tmp_out.name.rsplit('.', 1)[0]): # 确保是我们创建的
                  try:
                     os.remove(temp_ppm_prefix + ".ppm")
@@ -147,91 +147,72 @@ class DynamicOCRDataset(Dataset):
             example = self.ds[idx]
             pdf_id_to_use = example.get("id")
 
-            if not example or not isinstance(example, dict):
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 错误 - 样本为空或非字典类型: {type(example)}")
-                return {
-                    "image": None,
-                    "instruction_text": "ERROR_INVALID_SAMPLE_STRUCTURE",
-                    "target_text": "ERROR_INVALID_SAMPLE_STRUCTURE",
-                    "id": f"ERROR_IDX_{idx}_INVALID_SAMPLE",
-                    "__error__": "Invalid sample structure"
-                }
+            if not pdf_id_to_use:
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 跳过 - 样本中缺少 'id' 键.")
+                return None
 
-            if pdf_id_to_use:
-                image_data_result = process_image(pdf_id_to_use, max_side=self.max_side)
-            else:
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 错误 - 样本中缺少 'id' 键: {example}")
-                return {
-                    "image": None,
-                    "instruction_text": "ERROR_MISSING_ID_IN_SAMPLE",
-                    "target_text": "ERROR_MISSING_ID_IN_SAMPLE",
-                    "id": f"ERROR_IDX_{idx}_MISSING_ID",
-                    "__error__": "Missing 'id' in sample"
-                }
+            # 1. 处理图像
+            image_data_result = process_image(pdf_id_to_use, max_side=self.max_side)
             
-            response_str = example.get("response")
-            if not response_str or not isinstance(response_str, str):
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 警告 - 'response' 字段为空或非字符串: {response_str}")
-                natural_text = "ERROR_EMPTY_OR_INVALID_RESPONSE"
-            else:
-                try:
-                    response_json = json.loads(response_str)
-                    natural_text = response_json.get("natural_text", "")
-                    if not natural_text:
-                        natural_text = "PLACEHOLDER_EMPTY_NATURAL_TEXT"
-                except json.JSONDecodeError as e_json:
-                    print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 错误 - 'response' 字段JSON解码失败. Error: {e_json}")
-                    natural_text = "ERROR_JSON_DECODE_RESPONSE"
+            if not image_data_result.get("success") or not isinstance(image_data_result.get("image"), Image.Image):
+                error_detail = image_data_result.get("error", "未知图像处理错误")
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 跳过 - 图像处理失败或返回无效图像. 错误: {error_detail}")
+                return None
+            
+            pil_image_for_sample = image_data_result["image"]
 
+            # 2. 处理 response JSON
+            response_str = example.get("response")
+            natural_text = "" # 初始化为空字符串
+
+            if not response_str or not isinstance(response_str, str):
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 跳过 - 'response' 字段为空或非字符串.")
+                return None
+            
+            try:
+                response_json = json.loads(response_str)
+                natural_text = response_json.get("natural_text", "") # 如果没有natural_text，默认为空字符串
+                if not natural_text: # 明确处理 natural_text 为空字符串的情况
+                    natural_text = "PLACEHOLDER_EMPTY_NATURAL_TEXT" # 或保持为空，取决于后续处理
+            except json.JSONDecodeError as e_json:
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 跳过 - 'response' 字段JSON解码失败. Error: {e_json}")
+                return None # 跳过此样本
+            
+            # 如果执行到这里，说明图像和文本都已成功处理
             input_text_prompt = "请对图片内容进行详细的OCR识别，包括所有文字和排版信息。"
             
-            # Process image and prepare the sample
-            pil_image_for_sample = None
-            
-            if image_data_result.get("success") and isinstance(image_data_result.get("image"), Image.Image):
-                pil_image_for_sample = image_data_result.get("image")
-            # pil_image_for_sample remains None if the above condition is not met.
-            
-            final_sample = {
-                "image": pil_image_for_sample, # This will be the PIL.Image object or None
+            return {
+                "image": pil_image_for_sample,
                 "instruction_text": input_text_prompt,
                 "target_text": natural_text,
                 "id": str(pdf_id_to_use),
             }
 
-            # Handle errors and set "__error__" key
-            # Case 1: process_image itself reported failure
-            if not image_data_result.get("success"):
-                error_msg = image_data_result.get("error", "Unknown error during process_image.")
-                final_sample["__error__"] = error_msg
-                # Ensure image is None if process_image failed
-                final_sample["image"] = None 
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): process_image failed. Error: {error_msg}")
-            # Case 2: process_image reported success, but the 'image' field is not a PIL.Image (e.g., it's None or wrong type)
-            elif not isinstance(pil_image_for_sample, Image.Image) and image_data_result.get("success"):
-                error_msg = f"process_image succeeded but returned invalid image type: {type(image_data_result.get('image')).__name__}"
-                final_sample["__error__"] = error_msg
-                # Ensure image is explicitly None in the sample if it's not a valid PIL image, even if success was true.
-                final_sample["image"] = None 
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): Invalid image type after process_image. Error: {error_msg}")
-            # Case 3: pil_image_for_sample is None, but no specific error was set from process_image results (should be covered by above, but as a safeguard)
-            elif pil_image_for_sample is None and "__error__" not in final_sample:
-                error_msg = "Image is None after processing, and no specific error was reported by process_image."
-                final_sample["__error__"] = error_msg
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): {error_msg}")
-            
-            return dict(final_sample)
-
         except Exception as e_outer:
-            print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 发生严重外部错误: {e_outer}")
-            print(traceback.format_exc())
-            return {
-                "image": None,
-                "instruction_text": "ERROR_OUTER_EXCEPTION_IN_GETITEM",
-                "target_text": "ERROR_OUTER_EXCEPTION_IN_GETITEM",
-                "id": f"ERROR_IDX_{idx}_OUTER_EXCEPTION",
-                "__error__": f"Outer exception: {e_outer}"
-            }
+            # 捕获任何在 __getitem__ 内部发生的其他未预料到的错误
+            pdf_id_info = example.get("id", "未知ID") if 'example' in locals() else "未知ID"
+            print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_info}): 跳过 - 发生意外的外部错误: {e_outer}")
+            # traceback.print_exc() # 如果需要详细堆栈跟踪，可以取消注释，但为了简洁，默认注释掉
+            return None
+
+def custom_collate_fn(batch):
+    valid_samples = []
+    for item in batch:
+        if item is None: # 如果 __getitem__ 返回了 None
+            # print(f"[PID {os.getpid()}] collate_fn: Received a None item, skipping.") # 可选的调试信息
+            continue # 跳过这个 None 值
+        valid_samples.append(item)
+
+    if not valid_samples:
+        # print(f"[PID {os.getpid()}] collate_fn: Entire batch is invalid, returning None.") # 可选的调试信息
+        return None # 如果整个批次都是无效的，返回 None
+
+    keys = valid_samples[0].keys()
+    collated_batch = {}
+    for key in keys:
+        collated_batch[key] = [d.get(key) for d in valid_samples]
+
+    return collated_batch
 
 def create_dataloader(batch_size, num_workers, shuffle=True, max_samples=None, data_path=LOCAL_DATASET_PATH, pdf_dir=PDF_DIR, max_side=MAX_SIDE):
     dataset = load_dataset("parquet", data_files=data_path, split=f"train[:{max_samples}]" if max_samples else "train")
@@ -243,6 +224,7 @@ def create_dataloader(batch_size, num_workers, shuffle=True, max_samples=None, d
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
+        collate_fn=custom_collate_fn,
         # pin_memory=True, # pin_memory=True 通常与 num_workers > 0 结合使用效果更佳
         drop_last=True
     ), processed_dataset
@@ -295,12 +277,6 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
 
         # 2. 使用PIL读取PPM图像
         img = Image.open(temp_ppm_file_render).convert("RGB")
-
-        # 3. 缩放图像以适应 target_longest_dim，保持宽高比
-        #    原fitz逻辑是：scale = target_longest_dim / max(width, height)，然后get_pixmap(matrix=fitz.Matrix(scale, scale))
-        #    这等同于将图像缩放到最长边为 target_longest_dim，然后粘贴到黑色背景
-        
-        # 使用Pillow的thumbnail进行等比例缩放，使其最长边不超过target_longest_dim
         img.thumbnail((target_longest_dim, target_longest_dim), Image.Resampling.LANCZOS)
         
         # 创建一个固定大小的黑色背景图像 (原代码是黑色 (0,0,0))
@@ -316,7 +292,6 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
         padded_img.save(buffer, format="PNG")
         img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
         
-        # 主动调用垃圾回收 (可选，但保留原逻辑)
         del img
         del padded_img
         gc.collect()
@@ -338,124 +313,3 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
         if os.path.exists(temp_ppm_prefix_render + ".ppm") and temp_ppm_prefix_render.endswith(tmp_out_render.name.rsplit('.',1)[0]):
             try: os.remove(temp_ppm_prefix_render + ".ppm")
             except OSError: pass
-
-if __name__ == "__main__":
-    # 测试 num_workers=0 的情况
-    print("\n--- Testing with num_workers=0 ---")
-    # 使用较小的 max_samples 以便快速测试
-    dataloader_nw0, dataset_nw0 = create_dataloader(
-        batch_size=2, 
-        num_workers=0, 
-        max_samples=4,  # Reduced for faster testing
-        data_path=LOCAL_DATASET_PATH, 
-        pdf_dir=PDF_DIR, 
-        max_side=MAX_SIDE
-    )
-    print(f"创建了动态数据加载器 (nw=0)，数据集大小: {len(dataset_nw0)}")
-    print("加载一个批次数据 (nw=0)...")
-    
-    # nw=0 的详细检查
-    processed_batches_nw0 = 0
-    for i, batch_data_nw0 in enumerate(dataloader_nw0):
-        print(f"\n--- Batch {i} (nw=0) ---")
-        print(f"Type of batch_data: {type(batch_data_nw0)}")
-        if isinstance(batch_data_nw0, dict):
-            print(f"Keys in batch_data: {list(batch_data_nw0.keys())}")
-            
-            # 详细检查 image_bytes
-            if "image" in batch_data_nw0:
-                print(f"Length of image list: {len(batch_data_nw0['image'])}")
-                if batch_data_nw0['image'] and batch_data_nw0['image'][0] is not None:
-                    first_image_sample = batch_data_nw0['image'][0]
-                    print(f"Type of first image sample: {type(first_image_sample)}")
-                    if isinstance(first_image_sample, Image.Image):
-                        print(f"  Successfully decoded first image to PIL Image. Size: {first_image_sample.size}, Mode: {first_image_sample.mode}")
-                    else:
-                        print(f"  First image is not a PIL.Image, type: {type(first_image_sample)}")
-                else:
-                    print("  First image sample is None or list is empty.")
-            else:
-                print("  'image' key NOT found in batch_data.")
-
-            # 检查其他所有预期的键
-            expected_keys = ["instruction_text", "target_text", "id", "__error__"]
-            for k in expected_keys:
-                if k in batch_data_nw0:
-                    # Safely access the first element if it's a list and not empty
-                    value_list = batch_data_nw0[k]
-                    example_value = "N/A"
-                    if isinstance(value_list, list):
-                        if value_list: # List is not empty
-                            example_value = str(value_list[0])[:100] # Take first item, convert to str, truncate
-                        else: # List is empty
-                            example_value = "[] (empty list)"
-                    else: # Not a list
-                         example_value = str(value_list)[:100]
-
-
-                    print(f"  Key '{k}': Present. Type: {type(value_list)}. Example/Value[0]: {example_value}")
-                elif k != "__error__": # __error__ is optional
-                    print(f"  Key '{k}': MISSING")
-                elif k == "__error__" and k not in batch_data_nw0:
-                     print(f"  Key '{k}': Not present (which is good if no error)")
-
-
-        else:
-            print(f"batch_data (nw=0) is not a dict, it's: {batch_data_nw0}")
-        
-        processed_batches_nw0 += 1
-        if processed_batches_nw0 >= 1: # 只检查第一个批次进行详细打印
-            break
-    if processed_batches_nw0 == 0:
-        print("  (nw=0) No batches were processed from dataloader_nw0.")
-
-    # 测试 num_workers=2 (或您脚本中默认的) 的情况
-    print("\n--- Testing with num_workers=2 ---")
-    dataloader_nw2, dataset_nw2 = create_dataloader(
-        batch_size=2, 
-        num_workers=2, 
-        max_samples=4, # Reduced for faster testing
-        data_path=LOCAL_DATASET_PATH, 
-        pdf_dir=PDF_DIR, 
-        max_side=MAX_SIDE
-    )
-    print(f"创建了动态数据加载器 (nw=2)，数据集大小: {len(dataset_nw2)}")
-    print("加载一个批次数据 (nw=2)...")
-    
-    processed_batches_nw2 = 0
-    for i, batch_data_nw2 in enumerate(dataloader_nw2):
-        print(f"\n--- Batch {i} (nw=2) ---")
-        print(f"Type of batch_data: {type(batch_data_nw2)}")
-        if isinstance(batch_data_nw2, dict):
-            print(f"Keys in batch_data: {list(batch_data_nw2.keys())}")
-            
-            if "image" in batch_data_nw2:
-                print(f"Length of image list: {len(batch_data_nw2['image'])}")
-                if batch_data_nw2['image'] and batch_data_nw2['image'][0] is not None:
-                    first_image_sample_nw2 = batch_data_nw2['image'][0]
-                    print(f"Type of first image sample: {type(first_image_sample_nw2)}")
-                    if isinstance(first_image_sample_nw2, Image.Image):
-                        print(f"  Successfully decoded first image to PIL Image. Size: {first_image_sample_nw2.size}, Mode: {first_image_sample_nw2.mode}")
-                    else:
-                        print(f"  First image is not a PIL.Image, type: {type(first_image_sample_nw2)}")
-
-                else:
-                    print("  First image sample (nw=2) is None or list is empty.")
-            else:
-                 print("  'image' key NOT found in batch_data (nw=2).")
-            
-            # 简化的其他键检查 (nw=2)
-            for k_nw2 in ["instruction_text", "target_text", "id"]:
-                 if k_nw2 in batch_data_nw2:
-                     print(f"  Key '{k_nw2}' (nw=2): Present")
-                 else:
-                     print(f"  Key '{k_nw2}' (nw=2): MISSING")
-
-        else:
-            print(f"batch_data (nw=2) is not a dict, it's: {batch_data_nw2}")
-
-        processed_batches_nw2 +=1
-        if processed_batches_nw2 >= 1: # 只检查第一个批次
-            break
-    if processed_batches_nw2 == 0:
-        print("  (nw=2) No batches were processed from dataloader_nw2.") 
