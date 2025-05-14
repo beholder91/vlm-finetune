@@ -22,7 +22,6 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
     """处理单个图像，使用pdftoppm和PIL，确保所有图像具有相同尺寸"""
-    print(f"[PID {os.getpid()}] process_image: 开始处理 pdf_id: {pdf_id}")
     pdf_path = os.path.join(PDF_DIR, f"{pdf_id}.pdf")
 
     if not os.path.exists(pdf_path):
@@ -139,20 +138,14 @@ class DynamicOCRDataset(Dataset):
         self.pdf_dir = pdf_dir
         self.max_side = max_side
         # self.processor = processor # 如果在此处使用processor，需要确保它是线程安全的或每个worker一个实例
-        print(f"[PID {os.getpid()}] DynamicOCRDataset 初始化完成，数据集大小: {len(self.ds)}")
     
     def __len__(self):
         return len(self.ds)
     
     def __getitem__(self, idx):
-        print(f"[PID {os.getpid()}] __getitem__: 开始处理索引 {idx}")
         try:
             example = self.ds[idx]
             pdf_id_to_use = example.get("id")
-            if pdf_id_to_use:
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 获取样本 id: {pdf_id_to_use}, keys: {list(example.keys()) if isinstance(example, dict) else 'N/A'}")
-            else:
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 获取样本 (无id), keys: {list(example.keys()) if isinstance(example, dict) else 'N/A'}")
 
             if not example or not isinstance(example, dict):
                 print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 错误 - 样本为空或非字典类型: {type(example)}")
@@ -165,11 +158,7 @@ class DynamicOCRDataset(Dataset):
                 }
 
             if pdf_id_to_use:
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 使用 pdf_id: {pdf_id_to_use}")
                 image_data_result = process_image(pdf_id_to_use, max_side=self.max_side)
-                # Log a summary of process_image result, showing type of image
-                log_image_data_result = {k: v if k != 'image' else (type(v).__name__ if v is not None else None) for k, v in image_data_result.items()}
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): process_image 结果: {log_image_data_result}")
             else:
                 print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 错误 - 样本中缺少 'id' 键: {example}")
                 return {
@@ -245,7 +234,6 @@ class DynamicOCRDataset(Dataset):
             }
 
 def create_dataloader(batch_size, num_workers, shuffle=True, max_samples=None, data_path=LOCAL_DATASET_PATH, pdf_dir=PDF_DIR, max_side=MAX_SIDE):
-    print(f"加载数据集: {data_path}，共{max_samples if max_samples is not None else '全部'}个样本")
     dataset = load_dataset("parquet", data_files=data_path, split=f"train[:{max_samples}]" if max_samples else "train")
     
     processed_dataset = DynamicOCRDataset(dataset, pdf_dir=pdf_dir, max_side=max_side)
@@ -261,8 +249,6 @@ def create_dataloader(batch_size, num_workers, shuffle=True, max_samples=None, d
 
 def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> str:
     """使用 pdftoppm 和 PIL 将 PDF 首页渲染为指定最大边长的 Base64 PNG 字符串。"""
-    print(f"[PID {os.getpid()}] render_pdf_to_base64png: 开始处理 PDF: {pdf_path} to base64, target_longest_dim: {target_longest_dim}")
-    
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"PDF 文件不存在: {pdf_path}")
 
