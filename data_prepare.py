@@ -16,7 +16,7 @@ import tempfile
 # 配置参数 - 可以直接在此修改
 LOCAL_DATASET_PATH = "./olmOCR-mix-0225/train-s2pdf.parquet"
 PDF_DIR = "./olmOCR-mix-0225/pdfs"
-MAX_SIDE = 1024  # 图像最大边长
+MAX_SIDE = 448  # 图像最大边长
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 

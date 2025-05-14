@@ -227,7 +227,7 @@ def main():
         save_steps=SAVE_STEPS,
         report_to=["wandb"],
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,
         ddp_find_unused_parameters=False,
         dataloader_num_workers=0,
         remove_unused_columns=False

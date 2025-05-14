@@ -4,7 +4,7 @@ mixed_precision: fp16
 num_processes: 4
 
 fsdp_config:
-  use_orig_params: false
+  use_orig_params: true
   fsdp_sharding_strategy: full_shard
   fsdp_auto_wrap_policy: size_based_wrap
   fsdp_min_num_params: 100000000
