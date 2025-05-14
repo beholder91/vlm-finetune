@@ -161,13 +161,10 @@ class DynamicOCRDataset(Dataset):
             if not example or not isinstance(example, dict):
                 print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 错误 - 样本为空或非字典类型: {type(example)}")
                 return {
-                    "image_bytes": None, # 修改为 image_bytes
-                    "image_is_bytes": True,
-                    "input_text": "ERROR_INVALID_SAMPLE_STRUCTURE",
-                    "text": "ERROR_INVALID_SAMPLE_STRUCTURE",
+                    "image": None,
+                    "instruction_text": "ERROR_INVALID_SAMPLE_STRUCTURE",
+                    "target_text": "ERROR_INVALID_SAMPLE_STRUCTURE",
                     "id": f"ERROR_IDX_{idx}_INVALID_SAMPLE",
-                    "width": self.max_side,
-                    "height": self.max_side,
                     "__error__": "Invalid sample structure"
                 }
 
@@ -175,13 +172,10 @@ class DynamicOCRDataset(Dataset):
             if not pdf_id_to_use:
                 print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 错误 - 样本中缺少 'id' 键: {example}")
                 return {
-                    "image_bytes": None, # 修改为 image_bytes
-                    "image_is_bytes": True,
-                    "input_text": "ERROR_MISSING_ID_IN_SAMPLE",
-                    "text": "ERROR_MISSING_ID_IN_SAMPLE",
+                    "image": None,
+                    "instruction_text": "ERROR_MISSING_ID_IN_SAMPLE",
+                    "target_text": "ERROR_MISSING_ID_IN_SAMPLE",
                     "id": f"ERROR_IDX_{idx}_MISSING_ID",
-                    "width": self.max_side,
-                    "height": self.max_side,
                     "__error__": "Missing 'id' in sample"
                 }
             
@@ -208,7 +202,7 @@ class DynamicOCRDataset(Dataset):
 
             input_text_prompt = "请对图片内容进行详细的OCR识别，包括所有文字和排版信息。"
             
-            image_bytes_to_return = None
+            image_data = None
             image_is_bytes_flag = True # Always true now
 
             if image_data_result.get("success") and isinstance(image_data_result.get("image"), Image.Image):
@@ -216,27 +210,28 @@ class DynamicOCRDataset(Dataset):
                 try:
                     buffer = io.BytesIO()
                     pil_image.save(buffer, format="PNG")
-                    image_bytes_to_return = buffer.getvalue()
-                    print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): PIL Image 转换为 PNG bytes, 大小: {len(image_bytes_to_return)}")
+                    image_data = {
+                        "image": pil_image,
+                        "width": image_data_result.get("width", self.max_side),
+                        "height": image_data_result.get("height", self.max_side),
+                        "pdf_id": pdf_id_to_use
+                    }
+                    print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): PIL Image 转换为 PNG bytes, 大小: {len(buffer.getvalue())}")
                 except Exception as e_save_bytes:
                     print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 错误 - PIL Image 转换为 PNG bytes 失败: {e_save_bytes}")
                     print(traceback.format_exc())
-                    # image_bytes_to_return remains None
             
             final_sample = {
-                "image_bytes": image_bytes_to_return,
-                "image_is_bytes": image_is_bytes_flag,
-                "input_text": input_text_prompt,
-                "text": natural_text,
+                "image": image_data,
+                "instruction_text": input_text_prompt,
+                "target_text": natural_text,
                 "id": str(pdf_id_to_use),
-                "width": image_data_result.get("width", self.max_side) if image_data_result.get("success") else self.max_side,
-                "height": image_data_result.get("height", self.max_side) if image_data_result.get("success") else self.max_side,
             }
 
-            if not image_data_result.get("success") or image_bytes_to_return is None:
+            if not image_data_result.get("success") or image_data is None:
                 # Ensure __error__ is set if image processing failed or byte conversion failed
                 error_detail = image_data_result.get("error", "Unknown image processing error")
-                if image_data_result.get("success") and image_bytes_to_return is None: # Conversion failed
+                if image_data_result.get("success") and image_data is None: # Conversion failed
                      error_detail = "PIL Image to PNG bytes conversion failed"
                 final_sample["__error__"] = error_detail
                 print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 图像处理或转换字节流失败，错误: {final_sample['__error__']}")
@@ -247,13 +242,10 @@ class DynamicOCRDataset(Dataset):
             print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 发生严重外部错误: {e_outer}")
             print(traceback.format_exc())
             return {
-                "image_bytes": None, # 修改为 image_bytes
-                "image_is_bytes": True,
-                "input_text": "ERROR_OUTER_EXCEPTION_IN_GETITEM",
-                "text": "ERROR_OUTER_EXCEPTION_IN_GETITEM",
+                "image": None,
+                "instruction_text": "ERROR_OUTER_EXCEPTION_IN_GETITEM",
+                "target_text": "ERROR_OUTER_EXCEPTION_IN_GETITEM",
                 "id": f"ERROR_IDX_{idx}_OUTER_EXCEPTION",
-                "width": self.max_side,
-                "height": self.max_side,
                 "__error__": f"Outer exception: {e_outer}"
             }
 
@@ -392,27 +384,22 @@ if __name__ == "__main__":
             print(f"Keys in batch_data: {list(batch_data_nw0.keys())}")
             
             # 详细检查 image_bytes
-            if "image_bytes" in batch_data_nw0:
-                print(f"Length of image_bytes list: {len(batch_data_nw0['image_bytes'])}")
-                if batch_data_nw0['image_bytes'] and batch_data_nw0['image_bytes'][0] is not None:
-                    first_image_bytes_sample = batch_data_nw0['image_bytes'][0]
-                    print(f"Type of first image_bytes sample: {type(first_image_bytes_sample)}")
-                    if isinstance(first_image_bytes_sample, bytes):
-                        print(f"Size of first image_bytes sample: {len(first_image_bytes_sample)} bytes")
-                        try:
-                            img = Image.open(io.BytesIO(first_image_bytes_sample))
-                            print(f"  Successfully decoded first image_bytes to PIL Image. Size: {img.size}, Mode: {img.mode}")
-                        except Exception as e_decode:
-                            print(f"  ERROR decoding first image_bytes: {e_decode}")
+            if "image" in batch_data_nw0:
+                print(f"Length of image list: {len(batch_data_nw0['image'])}")
+                if batch_data_nw0['image'] and batch_data_nw0['image'][0] is not None:
+                    first_image_sample = batch_data_nw0['image'][0]
+                    print(f"Type of first image sample: {type(first_image_sample)}")
+                    if isinstance(first_image_sample, Image.Image):
+                        print(f"  Successfully decoded first image to PIL Image. Size: {first_image_sample.size}, Mode: {first_image_sample.mode}")
                     else:
-                        print(f"  First image_bytes sample is NOT bytes, but {type(first_image_bytes_sample)}")
+                        print(f"  First image is not a PIL.Image, type: {type(first_image_sample)}")
                 else:
-                    print("  First image_bytes sample is None or list is empty.")
+                    print("  First image sample is None or list is empty.")
             else:
-                print("  'image_bytes' key NOT found in batch_data.")
+                print("  'image' key NOT found in batch_data.")
 
             # 检查其他所有预期的键
-            expected_keys = ["text", "id", "input_text", "image_is_bytes", "width", "height", "__error__"]
+            expected_keys = ["instruction_text", "target_text", "id", "__error__"]
             for k in expected_keys:
                 if k in batch_data_nw0:
                     # Safely access the first element if it's a list and not empty
@@ -463,28 +450,23 @@ if __name__ == "__main__":
         if isinstance(batch_data_nw2, dict):
             print(f"Keys in batch_data: {list(batch_data_nw2.keys())}")
             
-            if "image_bytes" in batch_data_nw2:
-                print(f"Length of image_bytes list: {len(batch_data_nw2['image_bytes'])}")
-                if batch_data_nw2['image_bytes'] and batch_data_nw2['image_bytes'][0] is not None:
-                    first_image_bytes_sample_nw2 = batch_data_nw2['image_bytes'][0]
-                    print(f"Type of first image_bytes sample: {type(first_image_bytes_sample_nw2)}")
-                    if isinstance(first_image_bytes_sample_nw2, bytes):
-                        print(f"Size of first image_bytes sample: {len(first_image_bytes_sample_nw2)} bytes")
-                        try:
-                            img_nw2 = Image.open(io.BytesIO(first_image_bytes_sample_nw2))
-                            print(f"  Successfully decoded first image_bytes to PIL Image. Size: {img_nw2.size}, Mode: {img_nw2.mode}")
-                        except Exception as e_decode_nw2:
-                            print(f"  ERROR decoding first image_bytes (nw=2): {e_decode_nw2}")
+            if "image" in batch_data_nw2:
+                print(f"Length of image list: {len(batch_data_nw2['image'])}")
+                if batch_data_nw2['image'] and batch_data_nw2['image'][0] is not None:
+                    first_image_sample_nw2 = batch_data_nw2['image'][0]
+                    print(f"Type of first image sample: {type(first_image_sample_nw2)}")
+                    if isinstance(first_image_sample_nw2, Image.Image):
+                        print(f"  Successfully decoded first image to PIL Image. Size: {first_image_sample_nw2.size}, Mode: {first_image_sample_nw2.mode}")
                     else:
-                        print(f"  First image_bytes sample (nw=2) is NOT bytes, but {type(first_image_bytes_sample_nw2)}")
+                        print(f"  First image is not a PIL.Image, type: {type(first_image_sample_nw2)}")
 
                 else:
-                    print("  First image_bytes sample (nw=2) is None or list is empty.")
+                    print("  First image sample (nw=2) is None or list is empty.")
             else:
-                 print("  'image_bytes' key NOT found in batch_data (nw=2).")
+                 print("  'image' key NOT found in batch_data (nw=2).")
             
             # 简化的其他键检查 (nw=2)
-            for k_nw2 in ["text", "id", "input_text"]:
+            for k_nw2 in ["instruction_text", "target_text", "id"]:
                  if k_nw2 in batch_data_nw2:
                      print(f"  Key '{k_nw2}' (nw=2): Present")
                  else:

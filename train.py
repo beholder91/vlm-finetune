@@ -75,121 +75,112 @@ def main():
 
     # 自定义数据整理函数，处理input_text作为输入提示
     def custom_data_collator(features):
-        print(f"[Collator PID {os.getpid()}] Inspecting {len(features)} features in this batch.")
+        # print(f"[Collator PID {os.getpid()}] Received {len(features)} features for collation.")
+        
+        # 过滤掉在 __getitem__ 中标记为包含错误的样本
         valid_features = []
-        problematic_feature_details = []
-
         for i, feature in enumerate(features):
-            feature_id_str = "UnknownID" # Default ID string
-            is_dict = isinstance(feature, dict)
-            
-            if is_dict:
-                feature_id_str = str(feature.get('id', f'UnknownID_InDict_Idx_{i}'))
-
-                # 新增：处理图像字节流
-                if feature.get("image_is_bytes") and feature.get("image_bytes") is not None:
-                    # print(f"[Collator PID {os.getpid()}] Feature {i} (id: {feature_id_str}) contains image_bytes. Attempting to decode.")
-                    try:
-                        img_bytes = feature["image_bytes"]
-                        pil_image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                        feature["image"] = pil_image # 将解码后的图像存入 "image" 键
-                        del feature["image_bytes"]
-                        del feature["image_is_bytes"]
-                        # print(f"[Collator PID {os.getpid()}] Feature {i} (id: {feature_id_str}) successfully decoded image_bytes to PIL.Image.")
-                    except Exception as e_decode:
-                        problematic_feature_details.append(f"Feature {i} (id: {feature_id_str}) failed to decode image_bytes: {e_decode}. Skipping.")
-                        # print(traceback.format_exc()) # 可选：打印完整堆栈以调试解码错误
-                        continue # 跳过这个损坏的特征
-                elif feature.get("image_is_bytes") and feature.get("image_bytes") is None:
-                    # __getitem__ 表明是字节流，但内容为 None (可能是在 __getitem__ 中处理失败)
-                    problematic_feature_details.append(f"Feature {i} (id: {feature_id_str}) marked as image_bytes but bytes are None. Error from __getitem__: {feature.get('__error__', 'Unknown error in __getitem__')}. Skipping.")
-                    continue
-
-            if not is_dict:
-                problematic_feature_details.append(f"Feature {i} (id: {feature_id_str}) is not a dict, type: {type(feature)}. Skipping.")
+            if feature.get("__error__") is not None:
+                # print(f"[Collator PID {os.getpid()}] Skipping feature {i} (ID: {feature.get('id', 'UnknownID')}) due to __error__: {feature['__error__']}")
                 continue
-
-            # 现在我们知道 feature 是一个 dict
-            # 检查是否包含必须的键，包括 "image" (此时应该已被image_bytes转换而来)
-            keys = feature.keys()
-            missing_keys = []
-            if "image" not in keys: missing_keys.append("image") # 必须检查 "image"，而不是 "image_bytes"
-            if "input_text" not in keys: missing_keys.append("input_text")
-            if "text" not in keys: missing_keys.append("text")
-
-            if missing_keys:
-                # 如果 image_is_bytes 为 True 但 image_bytes 为 None，之前已处理并跳过
-                # 此处 missing_keys 包含 "image" 意味着原始样本就没有 image_is_bytes 标记，或者解码失败后 continue 了
-                problematic_feature_details.append(f"Feature {i} (id: {feature_id_str}) is missing keys: {missing_keys}. All keys: {list(keys)}. Error from __getitem__: {feature.get('__error__', 'N/A')}. Skipping.")
+            if feature.get("image") is None:
+                # print(f"[Collator PID {os.getpid()}] Skipping feature {i} (ID: {feature.get('id', 'UnknownID')}) because image is None.")
                 continue
-            
-            if feature["image"] is None: # 此时的 feature["image"] 应该是 PIL Image 或 None
-                problematic_feature_details.append(f"Feature {i} (id: {feature_id_str}) has 'image' key, but its value is None. Error from __getitem__: {feature.get('__error__', 'Image became None')}. Skipping.")
-                continue
-            
-            # If we reach here, the feature is considered valid for basic structure
             valid_features.append(feature)
 
-        if problematic_feature_details:
-            print(f"[Collator PID {os.getpid()}] Problems found in batch features:")
-            for detail in problematic_feature_details:
-                print(f"  - {detail}")
-        
         if not valid_features:
-            print(f"[Collator PID {os.getpid()}] CRITICAL WARNING: No valid features left in batch after filtering. Original batch size: {len(features)}. Returning empty dict, expect a crash in Trainer.")
-            # To avoid immediate crash *in collator* with empty lists for processor:
-            # Option 1: Raise an error, which will be caught by the main try-except in train.py
-            raise ValueError(f"Custom_data_collator: No valid features in batch after filtering. Original size: {len(features)}.")
-            # Option 2: Return {} - but trainer.train() will likely fail more obscurely.
-            # return {} 
+            # print(f"[Collator PID {os.getpid()}] No valid features left after filtering errors. Original count: {len(features)}.")
+            # 根据 Trainer 的行为，返回一个空字典或特定的结构可能会导致后续错误，但至少 collate 本身不崩
+            # 或者，如果严格要求，可以抛出异常
+            raise ValueError("No valid features to collate after filtering items with errors or missing images.")
 
-        # Proceed with valid features
+        # 从有效特征中提取数据
+        images = [f["image"] for f in valid_features]
+        instruction_texts = [f["instruction_text"] for f in valid_features]
+        target_texts = [f["target_text"] for f in valid_features]
+
+        # 准备 processor 输入
+        # Qwen-VL 的 processor 可能需要特定的格式或使用 apply_chat_template
+        # 这里我们根据通用做法，将指令和目标合并，并添加 EOS token 到目标末尾
+        # 需要确保 processor.tokenizer.eos_token 是有效的
+        eos_token = processor.tokenizer.eos_token if processor.tokenizer.eos_token else ""
+        
+        full_texts_for_processing = [
+            instr + tgt + eos_token 
+            for instr, tgt in zip(instruction_texts, target_texts)
+        ]
+        
+        # print(f"[Collator PID {os.getpid()}] Sample full text for processing (0): '{full_texts_for_processing[0][:200]}...'")
+
         try:
-            images = [f["image"] for f in valid_features]
-            input_texts = [f["input_text"] for f in valid_features]
-            target_texts = [f["text"] for f in valid_features]
-            
-            # 创建以OCR提示作为文本输入的消息格式
-            messages = [
-                [
-                    {"role": "user", "content": [
-                        {"type": "text", "text": input_text},
-                        {"type": "image"}
-                    ]}
-                ] for input_text in input_texts
-            ]
-            
-            # 使用处理器的聊天模板生成格式化的提示
-            formatted_inputs = [
-                processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
-                for msg in messages
-            ]
-            
-            # 对输入和目标进行处理
-            inputs = processor(
-                text=formatted_inputs,
+            batch = processor(
+                text=full_texts_for_processing,
                 images=images,
-                padding=True,
+                padding=True,          # Padding to max length in batch
+                truncation=True,       # Truncate if exceeds model max length
                 return_tensors="pt"
             )
-            
-            # 处理目标文本
-            with processor.as_target_processor():
-                labels = processor(
-                    text=target_texts,
-                    padding=True, 
-                    return_tensors="pt"
-                ).input_ids
-            
-            # 设置标签
-            inputs["labels"] = labels
-            
-            return inputs
         except Exception as e_proc:
-            print(f"[Collator PID {os.getpid()}] Error during processor application in collator (with {len(valid_features)} valid features): {e_proc}")
-            print(traceback.format_exc())
-            # Propagate error. This will be caught by the main try-except in train.py's main function.
-            raise e_proc
+            # print(f"[Collator PID {os.getpid()}] Error during processor call: {e_proc}")
+            # print(traceback.format_exc())
+            raise
+
+        labels = batch["input_ids"].clone()
+
+        # 核心逻辑：在 labels 中 mask掉 instruction_text 部分，以及 padding 和特殊 image token
+        for i in range(len(valid_features)):
+            # 1. 确定 instruction_text 在当前样本的 tokenized input_ids 中的长度
+            #    注意：processor(...) 的分词行为可能与单独调用 processor.tokenizer(...) 有细微差别，
+            #    特别是关于特殊token（如BOS）的添加。
+            #    一种策略是只对 instruction_text 分词（不加特殊token），然后看 batch["input_ids"][i] 是否以 BOS 开头。
+            
+            instruction_only_tokens = processor.tokenizer(instruction_texts[i], add_special_tokens=False).input_ids
+            len_instruction_tokens = len(instruction_only_tokens)
+            
+            # 检查 batch["input_ids"][i] 的第一个 token 是否为 BOS token
+            # 并相应地调整掩码的起始长度
+            actual_mask_len = len_instruction_tokens
+            if processor.tokenizer.bos_token_id is not None and \
+               batch["input_ids"][i][0] == processor.tokenizer.bos_token_id:
+                # print(f"[Collator PID {os.getpid()}] Detected BOS token at start of input_ids for sample {i}. Adjusting mask.")
+                actual_mask_len += 1 # Mask the BOS token as well as it's part of the prompt
+            
+            # Mask instruction part
+            # print(f"[Collator PID {os.getpid()}] Masking {actual_mask_len} tokens for instruction part of sample {i}.")
+            labels[i, :actual_mask_len] = -100
+
+        # 2. Mask padding tokens
+        # print(f"[Collator PID {os.getpid()}] Masking padding tokens (ID: {processor.tokenizer.pad_token_id}).")
+        labels[labels == processor.tokenizer.pad_token_id] = -100
+
+        # 3. Mask special image tokens (来自用户提供的代码片段)
+        #    需要确认 Qwen2_5_VLProcessor 是否真的有 image_start_token 和 image_end_token 属性
+        #    以及这些 token 是否应该在 labels 中被忽略。
+        #    通常，如果图像信息是通过 pixel_values 传入，文本中的特殊图像标记可能用于定位，但不参与loss计算。
+        if hasattr(processor, "image_start_token_id") and hasattr(processor, "image_end_token_id"):
+            # print(f"[Collator PID {os.getpid()}] Masking image placeholder tokens.")
+            # 假设这些属性直接是 token ID
+            img_start_id = processor.image_start_token_id
+            img_end_id = processor.image_end_token_id
+            if img_start_id is not None: labels[labels == img_start_id] = -100
+            if img_end_id is not None: labels[labels == img_end_id] = -100
+        elif hasattr(processor.tokenizer, "img_start_id") and hasattr(processor.tokenizer, "img_end_id"):
+            # 有些模型的 tokenizer 可能直接有这些 ID，例如 qwen tokenizer
+            img_start_id = processor.tokenizer.img_start_id
+            img_end_id = processor.tokenizer.img_end_id
+            if img_start_id is not None: labels[labels == img_start_id] = -100
+            if img_end_id is not None: labels[labels == img_end_id] = -100
+        elif hasattr(processor.tokenizer, "image_token_index") and processor.tokenizer.image_token_index is not None:
+            # 旧版的一些 VLM processor 可能用单个 image_token_index
+            # print(f"[Collator PID {os.getpid()}] Masking single image_token_index (ID: {processor.tokenizer.image_token_index}).")
+            labels[labels == processor.tokenizer.image_token_index] = -100
+        else:
+            # print(f"[Collator PID {os.getpid()}] Image placeholder token IDs not found on processor or tokenizer for masking.")
+            pass # 如果没有明确的图像token，则不执行此掩码
+        
+        batch["labels"] = labels
+        # print(f"[Collator PID {os.getpid()}] Collation complete. Batch keys: {list(batch.keys())}")
+        return batch
 
     # 5. 使用自定义数据整理函数替代默认数据整理函数
     data_collator = custom_data_collator
@@ -208,7 +199,8 @@ def main():
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         gradient_checkpointing=True,
         ddp_find_unused_parameters=False,
-        dataloader_num_workers=0
+        dataloader_num_workers=0,
+        remove_unused_columns=False
         )
 
     # 7. Trainer 实例化
