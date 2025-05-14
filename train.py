@@ -142,32 +142,35 @@ def main():
     )
 
     # 8. 使用accelerator包装训练过程
-    with accelerator.main_process_first():
-        if accelerator.is_main_process:
-            print(f"Process {accelerator.process_index}: 即将开始训练...")
-            # 尝试加载一个批次，检查数据加载速度
-            try:
-                batch_start = time.time()
-                first_batch = next(iter(dataloader))
-                print(f"首批数据加载用时: {time.time() - batch_start:.2f}秒")
-            except Exception as e:
-                print(f"加载首批数据失败: {e}")
-                
-        try:
-            # 通过Trainer进行训练
-            train_start = time.time()
-            trainer.train()
-            if accelerator.is_main_process:
-                print(f"训练总用时: {time.time() - train_start:.2f}秒")
+    if accelerator.is_main_process:
+        print(f"Process {accelerator.process_index}: 即将开始训练...")
+        # 尝试加载一个批次，检查数据加载速度
+        # 注意：Trainer 会处理数据加载器的分布式封装，直接从dataloader迭代可能不直接反映训练情况
+        # try:
+        #     batch_start = time.time()
+        #     # first_batch = next(iter(dataloader)) # 如果dataloader已被prepare，trainer会处理它的分布式版本
+        #     print(f"首批数据加载用时: {time.time() - batch_start:.2f}秒")
+        # except Exception as e:
+        #     print(f"加载首批数据失败: {e}")
             
-            # 保存模型与处理器
-            if accelerator.is_main_process:
-                trainer.save_model(OUTPUT_DIR)
-                processor.save_pretrained(OUTPUT_DIR)
-                print(f"训练完成，模型保存在 {OUTPUT_DIR}")
-        except Exception as e:
-            if accelerator.is_main_process:
-                print(f"训练过程中出错: {e}")
+    try:
+        # 通过Trainer进行训练 (所有进程)
+        train_start = time.time()
+        trainer.train() # 移出 main_process_first
+        if accelerator.is_main_process:
+            print(f"训练总用时: {time.time() - train_start:.2f}秒")
+        
+        # 等待所有进程完成训练
+        accelerator.wait_for_everyone()
+        
+        # 保存模型与处理器 (仅主进程)
+        if accelerator.is_main_process:
+            trainer.save_model(OUTPUT_DIR)
+            processor.save_pretrained(OUTPUT_DIR)
+            print(f"训练完成，模型保存在 {OUTPUT_DIR}")
+    except Exception as e:
+        if accelerator.is_main_process:
+            print(f"训练过程中出错: {e}")
     
     # 9. 结束跟踪
     accelerator.end_training()

@@ -107,30 +107,35 @@ class DynamicOCRDataset(Dataset):
         example = self.ds[idx]
         
         # 处理图像
-        result = process_image(example["id"])
+        # 显式传递 max_side 给 process_image
+        image_processing_result = process_image(example["id"], max_side=self.max_side)
         
         # OCR提示语
         ocr_prompt = "Below is the image of one page of a document. Just return the plain text representation of this document as if you were reading it naturally. Do not hallucinate."
         
-        if result["success"]:
-            return {
-                "image": result["tensor"],
-                "input_text": ocr_prompt,  # 输入提示
-                "text": example["response"],  # 输出文本
-                "id": example["id"],
-                "width": result["width"],
-                "height": result["height"]
-            }
+        image_tensor_to_use = None
+        # 统一使用 self.max_side 作为返回的图像尺寸，因为 process_image 会填充到这个尺寸
+        width_to_use = self.max_side
+        height_to_use = self.max_side
+
+        if image_processing_result["success"]:
+            image_tensor_to_use = image_processing_result["tensor"]
+            # 如果process_image成功，它返回的tensor就是 (3, self.max_side, self.max_side)
+            # width 和 height 也是 self.max_side
         else:
             # 处理失败时，提供一个空白图像，与成功处理的图像大小一致
-            return {
-                "image": torch.zeros((3, self.max_side, self.max_side)),
-                "input_text": ocr_prompt,  # 输入提示
-                "text": example["response"],  # 输出文本
-                "id": example["id"],
-                "width": self.max_side,
-                "height": self.max_side
-            }
+            # 打印警告信息，方便追踪是哪个PDF处理失败
+            print(f"警告: 处理图像 {example['id']} 失败: {image_processing_result.get('error', '未知错误')}. 使用空白图像替代。")
+            image_tensor_to_use = torch.zeros((3, self.max_side, self.max_side))
+            
+        return {
+            "image": image_tensor_to_use,
+            "input_text": ocr_prompt,  # 输入提示
+            "text": example["response"],  # 输出文本
+            "id": example["id"],
+            "width": width_to_use,
+            "height": height_to_use
+        }
 
 def create_dataloader(batch_size=8, num_workers=4, shuffle=True, max_samples=None):
     """创建动态数据加载器"""
