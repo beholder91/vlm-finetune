@@ -72,6 +72,14 @@ def main():
 
     # 自定义数据整理函数，处理input_text作为输入提示
     def custom_data_collator(features):
+        print(f"Inspecting {len(features)} features in this batch.")
+        for i, feature in enumerate(features):
+            if "image" not in feature:
+                print(f"Feature {i} is missing 'image' key. Keys: {feature.keys()}")
+            elif feature["image"] is None:
+                print(f"Feature {i} has 'image' key but its value is None.")
+            # 您也可以打印 feature["image"] 的类型 type(feature["image"])
+        
         # 提取图像和文本
         images = [feature["image"] for feature in features]
         input_texts = [feature["input_text"] for feature in features]
