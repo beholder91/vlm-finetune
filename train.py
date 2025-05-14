@@ -75,49 +75,57 @@ def main():
 
     # 自定义数据整理函数，处理input_text作为输入提示
     def custom_data_collator(features):
-        # print(f"[Collator PID {os.getpid()}] Received {len(features)} features for collation.")
-        
-        # 过滤掉在 __getitem__ 中标记为包含错误的样本
         valid_features = []
         for i, feature in enumerate(features):
             if feature.get("__error__") is not None:
-                # print(f"[Collator PID {os.getpid()}] Skipping feature {i} (ID: {feature.get('id', 'UnknownID')}) due to __error__: {feature['__error__']}")
                 continue
             if feature.get("image") is None:
-                # print(f"[Collator PID {os.getpid()}] Skipping feature {i} (ID: {feature.get('id', 'UnknownID')}) because image is None.")
                 continue
             valid_features.append(feature)
 
         if not valid_features:
-            # print(f"[Collator PID {os.getpid()}] No valid features left after filtering errors. Original count: {len(features)}.")
-            # 根据 Trainer 的行为，返回一个空字典或特定的结构可能会导致后续错误，但至少 collate 本身不崩
-            # 或者，如果严格要求，可以抛出异常
             raise ValueError("No valid features to collate after filtering items with errors or missing images.")
 
-        # 从有效特征中提取数据
         images = [f["image"] for f in valid_features]
-        instruction_texts = [f["instruction_text"] for f in valid_features]
-        target_texts = [f["target_text"] for f in valid_features]
-
-        # 准备 processor 输入
-        # Qwen-VL 的 processor 可能需要特定的格式或使用 apply_chat_template
-        # 这里我们根据通用做法，将指令和目标合并，并添加 EOS token 到目标末尾
-        # 需要确保 processor.tokenizer.eos_token 是有效的
-        eos_token = processor.tokenizer.eos_token if processor.tokenizer.eos_token else ""
         
-        full_texts_for_processing = [
-            instr + tgt + eos_token 
-            for instr, tgt in zip(instruction_texts, target_texts)
+        batched_messages = []
+        target_texts_for_masking = [] 
+
+        for feature in valid_features:
+            instruction_text = feature["instruction_text"]
+            target_text = feature["target_text"]
+            
+            current_messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"}, 
+                        {"type": "text", "text": instruction_text}
+                    ]
+                },
+                {
+                    "role": "assistant", 
+                    "content": [{"type": "text", "text": target_text}]
+                }
+            ]
+            batched_messages.append(current_messages)
+            target_texts_for_masking.append(target_text)
+
+        texts_for_processing = [
+            processor.apply_chat_template(
+                messages_for_sample, 
+                tokenize=False, 
+                add_generation_prompt=False
+            ) 
+            for messages_for_sample in batched_messages
         ]
         
-        # print(f"[Collator PID {os.getpid()}] Sample full text for processing (0): '{full_texts_for_processing[0][:200]}...'")
-
         try:
             batch = processor(
-                text=full_texts_for_processing,
+                text=texts_for_processing,
                 images=images,
-                padding=True,          # Padding to max length in batch
-                truncation=True,       # Truncate if exceeds model max length
+                padding=True,
+                truncation=True,
                 return_tensors="pt"
             )
         except Exception as e_proc:
@@ -127,59 +135,81 @@ def main():
 
         labels = batch["input_ids"].clone()
 
-        # 核心逻辑：在 labels 中 mask掉 instruction_text 部分，以及 padding 和特殊 image token
+        # Mask prompt part in labels
         for i in range(len(valid_features)):
-            # 1. 确定 instruction_text 在当前样本的 tokenized input_ids 中的长度
-            #    注意：processor(...) 的分词行为可能与单独调用 processor.tokenizer(...) 有细微差别，
-            #    特别是关于特殊token（如BOS）的添加。
-            #    一种策略是只对 instruction_text 分词（不加特殊token），然后看 batch["input_ids"][i] 是否以 BOS 开头。
+            user_instruction_text = valid_features[i]["instruction_text"]
+            assistant_target_text = target_texts_for_masking[i]
+
+            prompt_only_messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": user_instruction_text}
+                    ]
+                }
+            ]
+            text_of_prompt_to_mask = processor.apply_chat_template(
+                prompt_only_messages,
+                tokenize=False,
+                add_generation_prompt=True 
+            )
             
-            instruction_only_tokens = processor.tokenizer(instruction_texts[i], add_special_tokens=False).input_ids
-            len_instruction_tokens = len(instruction_only_tokens)
-            
-            # 检查 batch["input_ids"][i] 的第一个 token 是否为 BOS token
-            # 并相应地调整掩码的起始长度
-            actual_mask_len = len_instruction_tokens
+            prompt_tokens_for_masking = processor.tokenizer(text_of_prompt_to_mask, add_special_tokens=False).input_ids
+            len_prompt_mask = len(prompt_tokens_for_masking)
+
+            current_mask_len = 0
             if processor.tokenizer.bos_token_id is not None and \
                batch["input_ids"][i][0] == processor.tokenizer.bos_token_id:
-                # print(f"[Collator PID {os.getpid()}] Detected BOS token at start of input_ids for sample {i}. Adjusting mask.")
-                actual_mask_len += 1 # Mask the BOS token as well as it's part of the prompt
-            
-            # Mask instruction part
-            # print(f"[Collator PID {os.getpid()}] Masking {actual_mask_len} tokens for instruction part of sample {i}.")
-            labels[i, :actual_mask_len] = -100
-
-        # 2. Mask padding tokens
-        # print(f"[Collator PID {os.getpid()}] Masking padding tokens (ID: {processor.tokenizer.pad_token_id}).")
-        labels[labels == processor.tokenizer.pad_token_id] = -100
-
-        # 3. Mask special image tokens (来自用户提供的代码片段)
-        #    需要确认 Qwen2_5_VLProcessor 是否真的有 image_start_token 和 image_end_token 属性
-        #    以及这些 token 是否应该在 labels 中被忽略。
-        #    通常，如果图像信息是通过 pixel_values 传入，文本中的特殊图像标记可能用于定位，但不参与loss计算。
-        if hasattr(processor, "image_start_token_id") and hasattr(processor, "image_end_token_id"):
-            # print(f"[Collator PID {os.getpid()}] Masking image placeholder tokens.")
-            # 假设这些属性直接是 token ID
-            img_start_id = processor.image_start_token_id
-            img_end_id = processor.image_end_token_id
-            if img_start_id is not None: labels[labels == img_start_id] = -100
-            if img_end_id is not None: labels[labels == img_end_id] = -100
-        elif hasattr(processor.tokenizer, "img_start_id") and hasattr(processor.tokenizer, "img_end_id"):
-            # 有些模型的 tokenizer 可能直接有这些 ID，例如 qwen tokenizer
-            img_start_id = processor.tokenizer.img_start_id
-            img_end_id = processor.tokenizer.img_end_id
-            if img_start_id is not None: labels[labels == img_start_id] = -100
-            if img_end_id is not None: labels[labels == img_end_id] = -100
-        elif hasattr(processor.tokenizer, "image_token_index") and processor.tokenizer.image_token_index is not None:
-            # 旧版的一些 VLM processor 可能用单个 image_token_index
-            # print(f"[Collator PID {os.getpid()}] Masking single image_token_index (ID: {processor.tokenizer.image_token_index}).")
-            labels[labels == processor.tokenizer.image_token_index] = -100
+                if batch["input_ids"][i][1 : 1 + len_prompt_mask].tolist() == prompt_tokens_for_masking:
+                    current_mask_len = 1 + len_prompt_mask
+                else:
+                    # Fallback: find target tokens by tokenizing target_text separately
+                    target_only_tokens = processor.tokenizer(assistant_target_text, add_special_tokens=False).input_ids
+                    found_target_start = -1
+                    for k_search in range(len(batch["input_ids"][i]) - len(target_only_tokens) + 1):
+                        if batch["input_ids"][i][k_search : k_search + len(target_only_tokens)].tolist() == target_only_tokens:
+                            if k_search + len(target_only_tokens) < len(batch["input_ids"][i]):
+                                next_token = batch["input_ids"][i][k_search + len(target_only_tokens)]
+                                if next_token == processor.tokenizer.eos_token_id or next_token == processor.tokenizer.pad_token_id:
+                                    found_target_start = k_search
+                                    break
+                            else: 
+                                found_target_start = k_search
+                                break
+                    if found_target_start != -1:
+                        current_mask_len = found_target_start
+                    else: 
+                        # Fallback to a simpler heuristic if robust target search fails
+                        instruction_tokens_for_fallback = processor.tokenizer(user_instruction_text, add_special_tokens=False).input_ids
+                        current_mask_len = len(instruction_tokens_for_fallback)
+                        if processor.tokenizer.bos_token_id is not None and batch["input_ids"][i][0] == processor.tokenizer.bos_token_id:
+                            current_mask_len += 1
+            else: 
+                if batch["input_ids"][i][:len_prompt_mask].tolist() == prompt_tokens_for_masking:
+                    current_mask_len = len_prompt_mask
+                else: 
+                    # Fallback for no BOS case
+                    instruction_tokens_for_fallback = processor.tokenizer(user_instruction_text, add_special_tokens=False).input_ids
+                    current_mask_len = len(instruction_tokens_for_fallback)
+            labels[i, :current_mask_len] = -100
+        
+        # Mask padding tokens
+        if processor.tokenizer.pad_token_id is not None:
+            labels[labels == processor.tokenizer.pad_token_id] = -100
         else:
-            # print(f"[Collator PID {os.getpid()}] Image placeholder token IDs not found on processor or tokenizer for masking.")
-            pass # 如果没有明确的图像token，则不执行此掩码
+            # print(f"[Collator PID {os.getpid()}] Warning: processor.tokenizer.pad_token_id is None.")
+            pass # Potentially use attention_mask if pad_token_id is None and padding exists
+
+        # Mask special vision tokens (e.g., <|image_pad|>)
+        # These should ideally be part of the prompt and masked already, but explicit masking is safer.
+        qwen_vision_tokens_to_mask_str = ["<|vision_start|>", "<|image_pad|>", "<|vision_end|>", "<|video_pad|>"]
+        for token_str in qwen_vision_tokens_to_mask_str:
+            token_id = processor.tokenizer.convert_tokens_to_ids(token_str)
+            if isinstance(token_id, int) and token_id != processor.tokenizer.unk_token_id : 
+                labels[labels == token_id] = -100
         
         batch["labels"] = labels
-        # print(f"[Collator PID {os.getpid()}] Collation complete. Batch keys: {list(batch.keys())}")
         return batch
 
     # 5. 使用自定义数据整理函数替代默认数据整理函数

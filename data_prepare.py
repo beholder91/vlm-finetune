@@ -22,9 +22,8 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
     """处理单个图像，使用pdftoppm和PIL，确保所有图像具有相同尺寸"""
-    print(f"[PID {os.getpid()}] process_image: 开始处理 pdf_id: {pdf_id} using pdftoppm")
+    print(f"[PID {os.getpid()}] process_image: 开始处理 pdf_id: {pdf_id}")
     pdf_path = os.path.join(PDF_DIR, f"{pdf_id}.pdf")
-    print(f"[PID {os.getpid()}] process_image: 构造的 PDF 路径: {pdf_path}")
 
     if not os.path.exists(pdf_path):
         print(f"[PID {os.getpid()}] process_image: 错误 - PDF 文件不存在: {pdf_path}, pdf_id: {pdf_id}")
@@ -37,7 +36,6 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
         # 我们需要一个prefix，然后找到实际生成的文件名
         with tempfile.NamedTemporaryFile(suffix=".ppm", delete=False) as tmp_out:
             temp_ppm_prefix = tmp_out.name.rsplit('.', 1)[0] # 获取不带后缀的路径作为prefix
-            # print(f"[PID {os.getpid()}] process_image: 临时PPM文件前缀: {temp_ppm_prefix}")
 
         # pdftoppm通常输出到stdout或指定文件。使用 -f 1 -l 1 仅处理第一页
         # 为了获取文件名，最好直接指定输出文件名而不是依赖stdout
@@ -52,7 +50,6 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
             temp_ppm_prefix # Output PPM file prefix
         ]
         
-        print(f"[PID {os.getpid()}] process_image: 执行命令: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
         generated_ppm_path = f"{temp_ppm_prefix}-000001.ppm" # pdftoppm 0.86+ 的命名格式
@@ -82,13 +79,10 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
             return {"success": False, "error": error_message, "pdf_id": pdf_id}
 
         temp_ppm_file = generated_ppm_path # 用于finally中删除
-        # print(f"[PID {os.getpid()}] process_image: PPM 文件已生成: {temp_ppm_file}")
 
         # 2. 使用PIL读取PPM图像
         img = Image.open(temp_ppm_file).convert("RGB") # 确保是RGB
         
-        # print(f"[PID {os.getpid()}] process_image (pdf_id: {pdf_id}): 成功从PPM加载图像，原始尺寸: {img.size}")
-
         # 3. 后续处理（旋转、缩放）与之前一致
         # 随机旋转（轻微）
         if random.random() < rotation_prob:
@@ -106,7 +100,6 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
         
         original_width, original_height = img.width, img.height # 注意这里是thumbnail后的尺寸
         
-        # print(f"[PID {os.getpid()}] process_image (pdf_id: {pdf_id}): 成功处理图像，最终尺寸: {background.size}")
         return {"success": True, "image": background, "width": original_width, "height": original_height, "pdf_id": pdf_id}
 
     except FileNotFoundError as e_fnf: # 特别处理pdftoppm未找到的情况
@@ -123,7 +116,6 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
         if temp_ppm_file and os.path.exists(temp_ppm_file):
             try:
                 os.remove(temp_ppm_file)
-                # print(f"[PID {os.getpid()}] process_image: 临时PPM文件已删除: {temp_ppm_file}")
             except OSError as e_ose:
                 print(f"[PID {os.getpid()}] process_image: 删除临时PPM文件失败: {temp_ppm_file}, Error: {e_ose}")
         # 尝试清理原始的空占位文件（如果delete=False导致它残留）
@@ -156,7 +148,11 @@ class DynamicOCRDataset(Dataset):
         print(f"[PID {os.getpid()}] __getitem__: 开始处理索引 {idx}")
         try:
             example = self.ds[idx]
-            print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 获取到的样本: {example}")
+            pdf_id_to_use = example.get("id")
+            if pdf_id_to_use:
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 获取样本 id: {pdf_id_to_use}, keys: {list(example.keys()) if isinstance(example, dict) else 'N/A'}")
+            else:
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 获取样本 (无id), keys: {list(example.keys()) if isinstance(example, dict) else 'N/A'}")
 
             if not example or not isinstance(example, dict):
                 print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 错误 - 样本为空或非字典类型: {type(example)}")
@@ -168,8 +164,13 @@ class DynamicOCRDataset(Dataset):
                     "__error__": "Invalid sample structure"
                 }
 
-            pdf_id_to_use = example.get("id")
-            if not pdf_id_to_use:
+            if pdf_id_to_use:
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 使用 pdf_id: {pdf_id_to_use}")
+                image_data_result = process_image(pdf_id_to_use, max_side=self.max_side)
+                # Log a summary of process_image result, showing type of image
+                log_image_data_result = {k: v if k != 'image' else (type(v).__name__ if v is not None else None) for k, v in image_data_result.items()}
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): process_image 结果: {log_image_data_result}")
+            else:
                 print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 错误 - 样本中缺少 'id' 键: {example}")
                 return {
                     "image": None,
@@ -179,13 +180,6 @@ class DynamicOCRDataset(Dataset):
                     "__error__": "Missing 'id' in sample"
                 }
             
-            print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}): 使用 pdf_id: {pdf_id_to_use}")
-            image_data_result = process_image(pdf_id_to_use, max_side=self.max_side)
-            # Log a summary of process_image result, showing type of image
-            log_image_data_result = {k: v if k != 'image' else (type(v).__name__ if v is not None else None) for k, v in image_data_result.items()}
-            print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): process_image 结果: {log_image_data_result}")
-
-
             response_str = example.get("response")
             if not response_str or not isinstance(response_str, str):
                 print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 警告 - 'response' 字段为空或非字符串: {response_str}")
@@ -196,45 +190,46 @@ class DynamicOCRDataset(Dataset):
                     natural_text = response_json.get("natural_text", "")
                     if not natural_text:
                         natural_text = "PLACEHOLDER_EMPTY_NATURAL_TEXT"
-                except json.JSONDecodeError:
-                    print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 错误 - 'response' 字段JSON解码失败: {response_str[:100]}...")
+                except json.JSONDecodeError as e_json:
+                    print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 错误 - 'response' 字段JSON解码失败. Error: {e_json}")
                     natural_text = "ERROR_JSON_DECODE_RESPONSE"
 
             input_text_prompt = "请对图片内容进行详细的OCR识别，包括所有文字和排版信息。"
             
-            image_data = None
-            image_is_bytes_flag = True # Always true now
-
+            # Process image and prepare the sample
+            pil_image_for_sample = None
+            
             if image_data_result.get("success") and isinstance(image_data_result.get("image"), Image.Image):
-                pil_image = image_data_result.get("image")
-                try:
-                    buffer = io.BytesIO()
-                    pil_image.save(buffer, format="PNG")
-                    image_data = {
-                        "image": pil_image,
-                        "width": image_data_result.get("width", self.max_side),
-                        "height": image_data_result.get("height", self.max_side),
-                        "pdf_id": pdf_id_to_use
-                    }
-                    print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): PIL Image 转换为 PNG bytes, 大小: {len(buffer.getvalue())}")
-                except Exception as e_save_bytes:
-                    print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 错误 - PIL Image 转换为 PNG bytes 失败: {e_save_bytes}")
-                    print(traceback.format_exc())
+                pil_image_for_sample = image_data_result.get("image")
+            # pil_image_for_sample remains None if the above condition is not met.
             
             final_sample = {
-                "image": image_data,
+                "image": pil_image_for_sample, # This will be the PIL.Image object or None
                 "instruction_text": input_text_prompt,
                 "target_text": natural_text,
                 "id": str(pdf_id_to_use),
             }
 
-            if not image_data_result.get("success") or image_data is None:
-                # Ensure __error__ is set if image processing failed or byte conversion failed
-                error_detail = image_data_result.get("error", "Unknown image processing error")
-                if image_data_result.get("success") and image_data is None: # Conversion failed
-                     error_detail = "PIL Image to PNG bytes conversion failed"
-                final_sample["__error__"] = error_detail
-                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): 图像处理或转换字节流失败，错误: {final_sample['__error__']}")
+            # Handle errors and set "__error__" key
+            # Case 1: process_image itself reported failure
+            if not image_data_result.get("success"):
+                error_msg = image_data_result.get("error", "Unknown error during process_image.")
+                final_sample["__error__"] = error_msg
+                # Ensure image is None if process_image failed
+                final_sample["image"] = None 
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): process_image failed. Error: {error_msg}")
+            # Case 2: process_image reported success, but the 'image' field is not a PIL.Image (e.g., it's None or wrong type)
+            elif not isinstance(pil_image_for_sample, Image.Image) and image_data_result.get("success"):
+                error_msg = f"process_image succeeded but returned invalid image type: {type(image_data_result.get('image')).__name__}"
+                final_sample["__error__"] = error_msg
+                # Ensure image is explicitly None in the sample if it's not a valid PIL image, even if success was true.
+                final_sample["image"] = None 
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): Invalid image type after process_image. Error: {error_msg}")
+            # Case 3: pil_image_for_sample is None, but no specific error was set from process_image results (should be covered by above, but as a safeguard)
+            elif pil_image_for_sample is None and "__error__" not in final_sample:
+                error_msg = "Image is None after processing, and no specific error was reported by process_image."
+                final_sample["__error__"] = error_msg
+                print(f"[PID {os.getpid()}] __getitem__ (idx: {idx}, pdf_id: {pdf_id_to_use}): {error_msg}")
             
             return dict(final_sample)
 
@@ -285,7 +280,6 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
             temp_ppm_prefix_render
         ]
         
-        print(f"[PID {os.getpid()}] render_pdf_to_base64png: 执行命令: {' '.join(cmd_render)}")
         result_render = subprocess.run(cmd_render, capture_output=True, text=True, check=False)
 
         generated_ppm_path_render = f"{temp_ppm_prefix_render}-000001.ppm"
@@ -312,7 +306,6 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
             raise RuntimeError(error_message_render)
 
         temp_ppm_file_render = generated_ppm_path_render
-        # print(f"[PID {os.getpid()}] render_pdf_to_base64png: PPM 文件已生成: {temp_ppm_file_render}")
 
         # 2. 使用PIL读取PPM图像
         img = Image.open(temp_ppm_file_render).convert("RGB")
