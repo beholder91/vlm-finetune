@@ -12,8 +12,6 @@ import subprocess
 import tempfile
 import torch
 
-# fitz.TOOLS.mupdf_display_errors(False) # <--- 移除
-
 # 配置参数 - 可以直接在此修改
 LOCAL_DATASET_PATH = "./olmOCR-mix-0225/train-s2pdf.parquet"
 PDF_DIR = "./olmOCR-mix-0225/pdfs"
@@ -31,16 +29,9 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
 
     temp_ppm_file = None
     try:
-        # 1. 使用pdftoppm将PDF第一页转换为PPM图像到临时文件
-        # pdftoppm会自动为输出文件名添加页码后缀，如 "prefix-000001.ppm"
-        # 我们需要一个prefix，然后找到实际生成的文件名
         with tempfile.NamedTemporaryFile(suffix=".ppm", delete=False) as tmp_out:
             temp_ppm_prefix = tmp_out.name.rsplit('.', 1)[0] # 获取不带后缀的路径作为prefix
 
-        # pdftoppm通常输出到stdout或指定文件。使用 -f 1 -l 1 仅处理第一页
-        # 为了获取文件名，最好直接指定输出文件名而不是依赖stdout
-        # 构建命令: pdftoppm -f 1 -l 1 -r 200 {pdf_path} {temp_ppm_prefix}
-        # -r 200 设置DPI为200，与之前fitz的get_pixmap(dpi=200)对应
         cmd = [
             "pdftoppm",
             "-f", "1",     # First page
@@ -53,18 +44,6 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
         generated_ppm_path = f"{temp_ppm_prefix}-000001.ppm" # pdftoppm 0.86+ 的命名格式
-        # 兼容旧版 pdftoppm 可能的命名格式如 prefix-1.ppm
-        if not os.path.exists(generated_ppm_path):
-            generated_ppm_path_alt = f"{temp_ppm_prefix}-1.ppm"
-            if os.path.exists(generated_ppm_path_alt):
-                generated_ppm_path = generated_ppm_path_alt
-            else: # 再尝试一个更简单的后缀
-                generated_ppm_path_single_page = f"{temp_ppm_prefix}.ppm" # 如果只有一页且不指定-singlefile，有些版本可能直接用prefix.ppm
-                if os.path.exists(generated_ppm_path_single_page):
-                     generated_ppm_path = generated_ppm_path_single_page
-                else: # 如果命令失败，result.stdout/stderr会有信息
-                    pass # generated_ppm_path 将不存在，后续会捕获
-
 
         if result.returncode != 0 or not os.path.exists(generated_ppm_path):
             error_message = f"pdftoppm 执行失败. Code: {result.returncode}. Error: {result.stderr.strip()}. stdout: {result.stdout.strip()}. PDF: {pdf_path}"
@@ -251,17 +230,6 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
         result_render = subprocess.run(cmd_render, capture_output=True, text=True, check=False)
 
         generated_ppm_path_render = f"{temp_ppm_prefix_render}-000001.ppm"
-        if not os.path.exists(generated_ppm_path_render):
-            generated_ppm_path_render_alt = f"{temp_ppm_prefix_render}-1.ppm"
-            if os.path.exists(generated_ppm_path_render_alt):
-                generated_ppm_path_render = generated_ppm_path_render_alt
-            else:
-                generated_ppm_path_render_single = f"{temp_ppm_prefix_render}.ppm"
-                if os.path.exists(generated_ppm_path_render_single):
-                    generated_ppm_path_render = generated_ppm_path_render_single
-                else:
-                    pass
-
 
         if result_render.returncode != 0 or not os.path.exists(generated_ppm_path_render):
             error_message_render = f"pdftoppm (render) 执行失败. Code: {result_render.returncode}. Error: {result_render.stderr.strip()}. stdout: {result_render.stdout.strip()}. PDF: {pdf_path}"
