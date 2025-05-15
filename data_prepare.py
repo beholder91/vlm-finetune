@@ -44,6 +44,17 @@ def process_image(pdf_id, rotation_prob=0.15, max_side=MAX_SIDE):
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
         generated_ppm_path = f"{temp_ppm_prefix}-000001.ppm" # pdftoppm 0.86+ 的命名格式
+        # 兼容旧版 pdftoppm 可能的命名格式如 prefix-1.ppm
+        if not os.path.exists(generated_ppm_path):
+            generated_ppm_path_alt = f"{temp_ppm_prefix}-1.ppm"
+            if os.path.exists(generated_ppm_path_alt):
+                generated_ppm_path = generated_ppm_path_alt
+            else: # 再尝试一个更简单的后缀
+                generated_ppm_path_single_page = f"{temp_ppm_prefix}.ppm" # 如果只有一页且不指定-singlefile，有些版本可能直接用prefix.ppm
+                if os.path.exists(generated_ppm_path_single_page):
+                     generated_ppm_path = generated_ppm_path_single_page
+                else: # 如果命令失败，result.stdout/stderr会有信息
+                    pass # generated_ppm_path 将不存在，后续会捕获
 
         if result.returncode != 0 or not os.path.exists(generated_ppm_path):
             error_message = f"pdftoppm 执行失败. Code: {result.returncode}. Error: {result.stderr.strip()}. stdout: {result.stdout.strip()}. PDF: {pdf_path}"
@@ -230,6 +241,16 @@ def render_pdf_to_base64png(pdf_path: str, target_longest_dim: int = 2048) -> st
         result_render = subprocess.run(cmd_render, capture_output=True, text=True, check=False)
 
         generated_ppm_path_render = f"{temp_ppm_prefix_render}-000001.ppm"
+        if not os.path.exists(generated_ppm_path_render):
+            generated_ppm_path_render_alt = f"{temp_ppm_prefix_render}-1.ppm"
+            if os.path.exists(generated_ppm_path_render_alt):
+                generated_ppm_path_render = generated_ppm_path_render_alt
+            else:
+                generated_ppm_path_render_single = f"{temp_ppm_prefix_render}.ppm"
+                if os.path.exists(generated_ppm_path_render_single):
+                    generated_ppm_path_render = generated_ppm_path_render_single
+                else:
+                    pass
 
         if result_render.returncode != 0 or not os.path.exists(generated_ppm_path_render):
             error_message_render = f"pdftoppm (render) 执行失败. Code: {result_render.returncode}. Error: {result_render.stderr.strip()}. stdout: {result_render.stdout.strip()}. PDF: {pdf_path}"
