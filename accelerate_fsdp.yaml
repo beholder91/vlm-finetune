@@ -1,7 +1,7 @@
 compute_environment: LOCAL_MACHINE
 distributed_type: FSDP
 mixed_precision: fp16
-num_processes: 4
+num_processes: 8
 
 fsdp_config:
   use_orig_params: true

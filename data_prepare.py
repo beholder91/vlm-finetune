@@ -13,7 +13,8 @@ import tempfile
 import torch
 
 # 配置参数 - 可以直接在此修改
-LOCAL_DATASET_PATH = "./olmOCR-mix-0225/train-s2pdf.parquet"
+# LOCAL_DATASET_PATH = "./olmOCR-mix-0225/train-s2pdf.parquet"
+LOCAL_DATASET_PATH = "./olmOCR-mix-0225/cleaned_train_data.parquet"
 PDF_DIR = "./olmOCR-mix-0225/pdfs"
 MAX_SIDE = 448  # 图像最大边长
 

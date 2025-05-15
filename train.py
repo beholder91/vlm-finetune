@@ -17,6 +17,8 @@ from transformers import (
 from transformers.integrations import WandbCallback
 import wandb
 from accelerate import Accelerator
+from accelerate.utils import InitProcessGroupKwargs
+import datetime
 
 # 导入数据处理模块
 from data_prepare import create_dataloader
@@ -37,9 +39,11 @@ GRADIENT_ACCUMULATION_STEPS = 16  # 加回梯度累积步数设置
 
 def main():
     # 1. 初始化 Accelerator
+    timeout_kwargs = InitProcessGroupKwargs(timeout=datetime.timedelta(seconds=7200))
     accelerator = Accelerator(
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,  # 明确设置数值，不使用"auto"
-        log_with="wandb"
+        log_with="wandb",
+        kwargs_handlers=[timeout_kwargs]
     )
     
     # 2. 在主进程中设置 wandb
